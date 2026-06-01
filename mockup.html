@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pixel Spark · Wide Dashboard Mockup (1280x400)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #0d0d0c; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      font-family: ui-monospace, "SF Mono", monospace;
+    }
+    /* The 1280x400 strip, scaled to fit. container-type lets labels size in
+       cqh/cqw so they track the buffer's pixel scale exactly. */
+    #strip {
+      position: relative;
+      width: min(1240px, 96vw);
+      aspect-ratio: 320 / 100;
+      container-type: size;
+      background: #141413;
+      box-shadow: 0 0 0 2px #2a2a28, 0 24px 70px rgba(0, 0, 0, 0.6);
+    }
+    #m { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; display: block; }
+    #labels { position: absolute; inset: 0; pointer-events: none; }
+    .lbl {
+      position: absolute; transform: translate(-50%, -50%);
+      font-size: 6.5cqh; font-weight: 700; letter-spacing: 0.12em;
+      text-transform: uppercase; color: #e8e6dc;
+      text-shadow: 0 0 6px rgba(0, 0, 0, 0.9); white-space: nowrap;
+    }
+    .lbl.hero { font-size: 9cqh; letter-spacing: 0.22em; }
+    #title {
+      position: absolute; top: 7cqh; left: 2cqw;
+      font-size: 6cqh; font-weight: 700; letter-spacing: 0.2em;
+      color: #b0aea5; opacity: 0.65;
+    }
+    #clock {
+      position: absolute; top: 7cqh; right: 2cqw;
+      font-size: 9cqh; font-weight: 700; letter-spacing: 0.1em;
+      color: #6a9bcc; opacity: 0.85;
+    }
+  </style>
+</head>
+<body>
+  <div id="strip">
+    <canvas id="m"></canvas>
+    <div id="labels">
+      <div id="title">HOMELAB · STATUS</div>
+      <div id="clock">--:--</div>
+    </div>
+  </div>
+
+  <script src="src/config.js"></script>
+  <script src="src/palette.js"></script>
+  <script src="src/spark.js"></script>
+  <script src="src/effects.js"></script>
+  <script src="src/mockup.js"></script>
+</body>
+</html>

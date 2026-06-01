@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Homelab Notify · Pixel Spark</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="screen" width="128" height="128"></canvas>
+    <div id="message"></div>
+  </div>
+  <div id="fps"></div>
+
+  <!--
+    Classic ordered <script> tags (not ES modules) on purpose: this runs
+    identically from a file:// double-click AND a static server, no build step.
+    Load order matters — each file attaches to the single window.App namespace.
+  -->
+  <script src="src/config.js"></script>
+  <script src="src/palette.js"></script>
+  <script src="src/spark.js"></script>
+  <script src="src/effects.js"></script>
+  <script src="src/renderer.js"></script>
+  <script src="src/notifier.js"></script>
+  <script src="src/demo.js"></script>
+  <script src="src/main.js"></script>
+  <!-- Later: comment out demo.js above and uncomment webhook.js for real triggers. -->
+  <!-- <script src="src/webhook.js"></script> -->
+</body>
+</html>

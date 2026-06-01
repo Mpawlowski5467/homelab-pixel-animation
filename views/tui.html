@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>homelab · tui (btop-style) · 1280x400</title>
+
+  <!-- Only permitted external resource: the theme font. Robust fallbacks below
+       keep it readable if Google Fonts can't be reached (offline rack). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    /* ---- reset + scaling wrapper (shared base spec) ---------------------- */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+      cursor: none;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+    }
+
+    /* The display is authored at a fixed 1280x400 logical size and scaled by JS
+       to fill the viewport, preserving the 3.2:1 aspect, letterboxed on black. */
+    #stage {
+      position: relative;
+      flex-shrink: 0;            /* never shrink below 1280×400 in a narrow viewport */
+      width: 1280px;
+      height: 400px;
+      transform-origin: center center;
+      background:
+        radial-gradient(140% 120% at 18% -10%, #131825 0%, #0c0f16 55%, #080a10 100%);
+      color: #c7d2e0;
+      overflow: hidden;
+      /* faint scanline texture so it reads like a real terminal panel */
+      box-shadow: inset 0 0 0 1px #1a2030;
+    }
+    /* gentle CRT-ish scanlines + vignette, drawn over the whole stage */
+    #stage::after {
+      content: "";
+      position: absolute; inset: 0;
+      pointer-events: none;
+      background:
+        repeating-linear-gradient(0deg,
+          rgba(0,0,0,0) 0px,
+          rgba(0,0,0,0) 2px,
+          rgba(0,0,0,0.10) 3px,
+          rgba(0,0,0,0) 4px),
+        radial-gradient(120% 130% at 50% 50%, rgba(0,0,0,0) 62%, rgba(0,0,0,0.32) 100%);
+      z-index: 50;
+      mix-blend-mode: normal;
+    }
+
+    /* ---- top status bar -------------------------------------------------- */
+    #topbar {
+      position: absolute; top: 0; left: 0; right: 0; height: 22px;
+      display: flex; align-items: center; gap: 14px;
+      padding: 0 14px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      color: #6f7e92;
+      z-index: 30;
+      user-select: none;
+      white-space: nowrap;
+    }
+    #topbar .brand { color: #00d3c7; font-weight: 800; letter-spacing: 0.10em; }
+    #topbar .host { color: #cdd8e6; font-weight: 700; }
+    #topbar .sep { color: #2b3447; }
+    #topbar .dim { color: #56657a; }
+    #topbar .ok { color: #51e07a; font-weight: 700; }
+    #topbar .grow { flex: 1 1 auto; }
+    #topbar .blink { animation: blink 1.05s steps(2,start) infinite; }
+    @keyframes blink { 50% { opacity: 0.15; } }
+
+    /* ---- 2x2 panel grid -------------------------------------------------- */
+    #grid {
+      position: absolute;
+      top: 22px; left: 0; right: 0; bottom: 0;
+      padding: 6px 8px 8px 8px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 8px;
+      z-index: 20;
+    }
+
+    /* btop-style rounded bordered panel with a notch title tab */
+    .panel {
+      position: relative;
+      background:
+        linear-gradient(180deg, rgba(20,26,40,0.92) 0%, rgba(15,20,32,0.92) 100%);
+      border: 1px solid #243047;
+      border-radius: 9px;
+      padding: 14px 12px 10px 12px;
+      overflow: hidden;
+    }
+    /* the colored title tab sitting in the top-left of the border */
+    .panel > .tab {
+      position: absolute;
+      top: -1px; left: 13px;
+      transform: translateY(-50%);
+      padding: 1px 9px 2px 9px;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.12em;
+      line-height: 1;
+      border-radius: 5px;
+      background: #0e1320;
+      border: 1px solid currentColor;
+      text-transform: lowercase;
+      white-space: nowrap;
+      z-index: 5;
+      text-shadow: 0 0 8px currentColor;
+    }
+    .panel > .tab .key { color: #43506a; font-weight: 700; margin-right: 4px; }
+    /* tiny right-aligned corner badge, like btop's menu hint */
+    .panel > .corner {
+      position: absolute; top: 4px; right: 9px;
+      font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em;
+      color: #3c4761;
+      z-index: 4;
+    }
+
+    .accent-cpu  { color: #00d3c7; }   /* cyan    */
+    .accent-mem  { color: #c46bff; }   /* magenta */
+    .accent-net  { color: #4d9bff; }   /* blue    */
+    .accent-proc { color: #51e07a; }   /* green   */
+
+    /* ===================== CPU panel ===================== */
+    #panel-cpu .body { position: absolute; inset: 14px 12px 10px 12px; }
+
+    #cpu-left {
+      position: absolute; top: 0; left: 0; width: 196px;
+    }
+    #cpu-pct {
+      font-size: 46px; font-weight: 800; line-height: 0.92;
+      color: #d8f6f3;
+      letter-spacing: -0.01em;
+      text-shadow: 0 0 14px rgba(0,211,199,0.35);
+    }
+    #cpu-pct .unit { font-size: 18px; font-weight: 700; color: #5fb8b2; margin-left: 2px; }
+    #cpu-meta {
+      margin-top: 5px;
+      font-size: 10px; line-height: 1.45; color: #74849a; font-weight: 500;
+    }
+    #cpu-meta b { color: #aebccf; font-weight: 700; }
+    #cpu-meta .cyan { color: #34c7bf; font-weight: 700; }
+
+    /* 4x4 core grid */
+    #cores {
+      position: absolute; top: 0; left: 206px; width: 158px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 4px 8px;
+    }
+    .core {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 9px; color: #5d6c81; font-weight: 600;
+    }
+    .core .cnum { width: 22px; color: #54627a; letter-spacing: -0.02em; }
+    .core .track {
+      position: relative; flex: 1 1 auto; height: 8px;
+      background: #0a0e17; border-radius: 2px; overflow: hidden;
+      box-shadow: inset 0 0 0 1px #1c2740;
+    }
+    .core .fill {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+      border-radius: 2px;
+      transition: width 0.42s cubic-bezier(.4,.1,.2,1), background-color 0.42s linear;
+    }
+
+    /* CPU history canvas fills the lower band */
+    #cpu-graph-wrap {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 96px;
+    }
+    canvas.graph { display: block; width: 100%; height: 100%; }
+
+    /* ===================== MEM & DISK panel ===================== */
+    #gauges {
+      position: absolute; inset: 16px 12px 12px 12px;
+      display: flex; flex-direction: column; justify-content: space-between;
+    }
+    .gauge { }
+    .gauge .ghead {
+      display: flex; align-items: baseline; gap: 8px;
+      font-size: 10.5px; margin-bottom: 4px;
+    }
+    .gauge .gname { font-weight: 800; letter-spacing: 0.04em; min-width: 92px; }
+    .gauge .gname .sub { color: #56657a; font-weight: 500; letter-spacing: 0; }
+    .gauge .gbytes { color: #8a99ad; font-weight: 600; flex: 1 1 auto; }
+    .gauge .gpct { color: #cdd8e6; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .gauge .gtrack {
+      position: relative; height: 13px;
+      background: #0a0e17; border-radius: 3px; overflow: hidden;
+      box-shadow: inset 0 0 0 1px #1c2740;
+    }
+    .gauge .gfill {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+      border-radius: 3px;
+      transition: width 0.6s cubic-bezier(.4,.1,.2,1);
+    }
+    /* segmented sheen overlay so the bars read like btop's braille meters */
+    .gauge .gtrack::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(90deg,
+        rgba(0,0,0,0) 0px, rgba(0,0,0,0) 3px, rgba(0,0,0,0.30) 4px, rgba(0,0,0,0) 5px);
+    }
+    .gname.c-ram  { color: #c46bff; }
+    .gname.c-swap { color: #f0b545; }
+    .gname.c-nvme { color: #4d9bff; }
+    .gname.c-tank { color: #00d3c7; }
+
+    /* ===================== NET panel ===================== */
+    #net-head {
+      position: absolute; top: 12px; left: 12px; right: 12px;
+      display: flex; gap: 22px; align-items: flex-start;
+    }
+    .net-stat { line-height: 1.05; }
+    .net-stat .label {
+      font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em; color: #5d6c81;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .net-stat .arrow { font-size: 11px; }
+    .net-stat .val {
+      font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums;
+      margin-top: 1px;
+    }
+    .net-stat .val .u { font-size: 11px; font-weight: 700; color: #5d6c81; margin-left: 2px; }
+    .net-stat .totd { font-size: 9px; color: #56657a; font-weight: 500; margin-top: 1px; }
+    .net-up   { color: #51e07a; }
+    .net-down { color: #4d9bff; }
+
+    #net-graph-wrap {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 96px;
+    }
+    #net-legend {
+      position: absolute; top: 12px; right: 12px;
+      font-size: 9px; color: #54627a; text-align: right; line-height: 1.5;
+    }
+    #net-legend i { font-style: normal; font-weight: 700; }
+
+    /* ===================== PROC panel ===================== */
+    #proc-table {
+      position: absolute; inset: 16px 10px 8px 12px;
+      font-size: 10.5px;
+      font-variant-numeric: tabular-nums;
+      overflow: hidden;            /* clean clip so an over-row never straddles the edge */
+    }
+    #proc-head, .prow {
+      display: grid;
+      grid-template-columns: 46px 1fr 64px 56px 52px;
+      align-items: center;
+      column-gap: 4px;
+    }
+    #proc-head {
+      color: #56657a; font-weight: 700; letter-spacing: 0.04em;
+      font-size: 9.5px;
+      padding: 0 4px 3px 4px;
+      border-bottom: 1px solid #202b40;
+    }
+    #proc-head .r { text-align: right; }
+    #proc-rows { position: relative; margin-top: 2px; }
+    .prow {
+      position: absolute; left: 0; right: 0;
+      height: 17px;
+      padding: 0 4px;
+      border-radius: 4px;
+      color: #93a2b6;
+      /* smooth reordering when the table re-sorts by CPU% */
+      transition: transform 0.55s cubic-bezier(.4,.05,.2,1),
+                  background-color 0.4s linear, color 0.4s linear;
+      will-change: transform;
+    }
+    .prow .pid { color: #54627a; font-weight: 600; }
+    .prow .cmd { color: #b6c4d6; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .prow .cmd .arg { color: #56657a; font-weight: 400; }
+    .prow .cpu, .prow .mem { text-align: right; font-weight: 700; }
+    .prow .cpu { color: #cdd8e6; }
+    .prow .mem { color: #8a99ad; }
+    .prow .bar {
+      position: relative; height: 4px; margin-left: 6px;
+      background: #10182a; border-radius: 2px; overflow: hidden;
+    }
+    .prow .bar > span {
+      position: absolute; left:0; top:0; bottom:0; width:0%;
+      background: #2f7d52; border-radius: 2px;
+      transition: width 0.5s linear, background-color 0.5s linear;
+    }
+    /* the hottest process glows */
+    .prow.hot { background: rgba(81,224,122,0.07); }
+    .prow.hot .cpu { color: #7df0a3; text-shadow: 0 0 8px rgba(81,224,122,0.5); }
+    .prow.warn .cpu { color: #f0b545; }
+    .prow.crit .cpu { color: #ff5a6e; text-shadow: 0 0 8px rgba(255,90,110,0.5); }
+  </style>
+</head>
+<body>
+  <div id="stage">
+
+    <!-- ---------- top status bar ---------- -->
+    <div id="topbar">
+      <span class="brand">btop++</span>
+      <span class="sep">│</span>
+      <span class="host">rack-01</span>
+      <span class="dim">proxmox-ve 8.2 · truenas-scale</span>
+      <span class="grow"></span>
+      <span class="dim">up <b id="tb-uptime" style="color:#aebccf">—</b></span>
+      <span class="sep">│</span>
+      <span class="dim">load <b id="tb-load" style="color:#aebccf">—</b></span>
+      <span class="sep">│</span>
+      <span class="dim">temp <b id="tb-temp" style="color:#aebccf">—</b></span>
+      <span class="sep">│</span>
+      <span class="ok">● online</span>
+      <span class="dim" id="tb-clock">--:--:--</span>
+      <span class="blink" style="color:#00d3c7">▮</span>
+    </div>
+
+    <!-- ---------- 2x2 grid ---------- -->
+    <div id="grid">
+
+      <!-- (1) CPU -->
+      <section class="panel" id="panel-cpu">
+        <div class="tab accent-cpu"><span class="key">1</span>cpu</div>
+        <div class="corner">amd ryzen · 16t</div>
+        <div class="body">
+          <div id="cpu-left">
+            <div id="cpu-pct"><span id="cpu-pct-num">0</span><span class="unit">%</span></div>
+            <div id="cpu-meta">
+              <div><b>AMD Ryzen 7 5800X</b></div>
+              <div>freq <span class="cyan" id="cpu-freq">—</span> · 8c/16t</div>
+              <div>load <span class="cyan" id="cpu-load">—</span></div>
+              <div>tctl <span class="cyan" id="cpu-temp">—</span></div>
+            </div>
+          </div>
+          <div id="cores"><!-- 16 cores injected --></div>
+          <div id="cpu-graph-wrap"><canvas id="cpu-graph" class="graph"></canvas></div>
+        </div>
+      </section>
+
+      <!-- (2) MEM & DISK -->
+      <section class="panel" id="panel-mem">
+        <div class="tab accent-mem"><span class="key">2</span>mem &amp; disk</div>
+        <div class="corner">zfs · arc</div>
+        <div id="gauges">
+          <div class="gauge" data-g="ram">
+            <div class="ghead">
+              <span class="gname c-ram">RAM <span class="sub">ddr4</span></span>
+              <span class="gbytes" id="ram-bytes">—</span>
+              <span class="gpct" id="ram-pct">—</span>
+            </div>
+            <div class="gtrack"><div class="gfill" id="ram-fill"></div></div>
+          </div>
+          <div class="gauge" data-g="swap">
+            <div class="ghead">
+              <span class="gname c-swap">SWAP <span class="sub">zram</span></span>
+              <span class="gbytes" id="swap-bytes">—</span>
+              <span class="gpct" id="swap-pct">—</span>
+            </div>
+            <div class="gtrack"><div class="gfill" id="swap-fill"></div></div>
+          </div>
+          <div class="gauge" data-g="nvme">
+            <div class="ghead">
+              <span class="gname c-nvme">nvme0 <span class="sub">/ root</span></span>
+              <span class="gbytes" id="nvme-bytes">—</span>
+              <span class="gpct" id="nvme-pct">—</span>
+            </div>
+            <div class="gtrack"><div class="gfill" id="nvme-fill"></div></div>
+          </div>
+          <div class="gauge" data-g="tank">
+            <div class="ghead">
+              <span class="gname c-tank">tank <span class="sub">/zfs raidz2</span></span>
+              <span class="gbytes" id="tank-bytes">—</span>
+              <span class="gpct" id="tank-pct">—</span>
+            </div>
+            <div class="gtrack"><div class="gfill" id="tank-fill"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- (3) NET -->
+      <section class="panel" id="panel-net">
+        <div class="tab accent-net"><span class="key">3</span>net eth0</div>
+        <div id="net-legend">
+          <div><i class="net-up">▲ tx</i> upload</div>
+          <div><i class="net-down">▼ rx</i> download</div>
+        </div>
+        <div id="net-head">
+          <div class="net-stat">
+            <div class="label net-up"><span class="arrow">▲</span> UP</div>
+            <div class="val net-up"><span id="net-up-val">0.0</span><span class="u" id="net-up-unit">MB/s</span></div>
+            <div class="totd">Σ <span id="net-up-tot">—</span></div>
+          </div>
+          <div class="net-stat">
+            <div class="label net-down"><span class="arrow">▼</span> DOWN</div>
+            <div class="val net-down"><span id="net-down-val">0.0</span><span class="u" id="net-down-unit">MB/s</span></div>
+            <div class="totd">Σ <span id="net-down-tot">—</span></div>
+          </div>
+        </div>
+        <div id="net-graph-wrap"><canvas id="net-graph" class="graph"></canvas></div>
+      </section>
+
+      <!-- (4) PROCESSES -->
+      <section class="panel" id="panel-proc">
+        <div class="tab accent-proc"><span class="key">4</span>proc</div>
+        <div class="corner" id="proc-count">— tasks</div>
+        <div id="proc-table">
+          <div id="proc-head">
+            <span>PID</span>
+            <span>COMMAND</span>
+            <span class="r">CPU%</span>
+            <span class="r">MEM%</span>
+            <span class="r">▾</span>
+          </div>
+          <div id="proc-rows"><!-- rows injected --></div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ====================================================================
+    // Scaling: fixed 1280x400 logical canvas -> fill viewport, letterboxed.
+    // ====================================================================
+    var stage = document.getElementById('stage');
+    function fit() {
+      var s = Math.min(innerWidth / 1280, innerHeight / 400);
+      stage.style.transform = 'scale(' + s + ')';
+    }
+    addEventListener('resize', fit);
+    fit();
+
+    // ====================================================================
+    // Small helpers
+    // ====================================================================
+    function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    function rnd(a, b) { return a + Math.random() * (b - a); }
+
+    // load-colour ramp: cyan(low) -> green -> yellow -> red(overload)
+    // returns an [r,g,b]
+    var C_CYAN  = [0, 211, 199];
+    var C_GREEN = [81, 224, 122];
+    var C_YELL  = [240, 181, 69];
+    var C_RED   = [255, 90, 110];
+    function mix(a, b, t) {
+      return [
+        Math.round(lerp(a[0], b[0], t)),
+        Math.round(lerp(a[1], b[1], t)),
+        Math.round(lerp(a[2], b[2], t))
+      ];
+    }
+    function loadColor(p) { // p: 0..1
+      var c;
+      if (p < 0.40)      c = mix(C_CYAN,  C_GREEN, p / 0.40);
+      else if (p < 0.70) c = mix(C_GREEN, C_YELL, (p - 0.40) / 0.30);
+      else if (p < 0.88) c = mix(C_YELL,  C_RED,  (p - 0.70) / 0.18);
+      else               c = C_RED;
+      return c;
+    }
+    function rgb(c)  { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+    function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+
+    // byte formatting (binary, like btop)
+    function fmtBytes(gb) { // input already in GiB
+      if (gb >= 1024) return (gb / 1024).toFixed(2) + 'T';
+      if (gb >= 100)  return gb.toFixed(0) + 'G';
+      if (gb >= 10)   return gb.toFixed(1) + 'G';
+      return gb.toFixed(2) + 'G';
+    }
+
+    // ====================================================================
+    // Fixed-length ring buffer for graph histories (NO memory growth).
+    // Stores Float32 values; reads chronologically oldest -> newest.
+    // ====================================================================
+    function Ring(n, init) {
+      this.n = n;
+      this.buf = new Float32Array(n);
+      if (init !== undefined) for (var i = 0; i < n; i++) this.buf[i] = init;
+      this.head = 0; // index of oldest
+    }
+    Ring.prototype.push = function (v) {
+      this.buf[this.head] = v;     // overwrite oldest slot, advance head
+      this.head = (this.head + 1) % this.n;
+    };
+    // value at chronological position i (0 = oldest)
+    Ring.prototype.at = function (i) {
+      return this.buf[(this.head + i) % this.n];
+    };
+
+    // ====================================================================
+    // Hi-DPI canvas setup (cap DPR at 2 so lines stay crisp, Pi stays happy)
+    // ====================================================================
+    var DPR = Math.min(2, window.devicePixelRatio || 1);
+    function setupCanvas(cv) {
+      var r = cv.getBoundingClientRect();
+      // getBoundingClientRect on a scaled stage returns scaled px; instead read
+      // the laid-out CSS box from offsetWidth/Height (unscaled logical px).
+      var cssW = cv.offsetWidth || r.width;
+      var cssH = cv.offsetHeight || r.height;
+      cv.width  = Math.max(1, Math.round(cssW * DPR));
+      cv.height = Math.max(1, Math.round(cssH * DPR));
+      var ctx = cv.getContext('2d');
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0); // draw in CSS px units
+      return { ctx: ctx, w: cssW, h: cssH };
+    }
+
+    // ====================================================================
+    // STATE — all mocked, drifts continuously.
+    // ====================================================================
+    var HISTORY = 120; // ring length for graphs
+
+    // CPU
+    var cpu = {
+      pct: 22,
+      target: 22,
+      shown: 22,
+      freq: 4.1,
+      cores: [],          // 16 values 0..1
+      coreTarget: [],
+      hist: new Ring(HISTORY, 0.18),
+      temp: 52
+    };
+    for (var i = 0; i < 16; i++) { cpu.cores[i] = rnd(0.08, 0.30); cpu.coreTarget[i] = cpu.cores[i]; }
+
+    // MEM & DISK gauges (values in GiB). pct drifts; bytes derived.
+    var gauges = {
+      ram:  { total: 32,   used: 14.8, target: 14.8, accent: C_MAG_VAL(), color: '#c46bff', el: 'ram'  },
+      swap: { total: 8,    used: 0.42, target: 0.42, color: '#f0b545', el: 'swap' },
+      nvme: { total: 931,  used: 372,  target: 372,  color: '#4d9bff', el: 'nvme' },
+      tank: { total: 21504,used: 13230,target: 13230,color: '#00d3c7', el: 'tank' } // ~21T raidz2
+    };
+    function C_MAG_VAL() { return [196, 107, 255]; }
+
+    // NET — rates in MB/s
+    var net = {
+      up: 1.2, upTarget: 1.2,
+      down: 8.5, downTarget: 8.5,
+      upHist:   new Ring(HISTORY, 1.2),
+      downHist: new Ring(HISTORY, 8.5),
+      upTot: 184.3,   // GiB cumulative
+      downTot: 1043.7,
+      scale: 30       // graph autoscale ceiling (MB/s), eases toward peak
+    };
+
+    // PROCESSES — stable believable set; cpu/mem jitter; re-sorted each refresh.
+    var procDefs = [
+      ['kvm',            'qemu-system-x86_64 -name win-vm', 0.55, 0.62],
+      ['jellyfin',       'ffmpeg -hwaccel vaapi -i …',      0.42, 0.18],
+      ['zfs',            'z_rd_int',                         0.16, 0.04],
+      ['dockerd',        '--containerd /run/…',             0.10, 0.07],
+      ['postgres',       'postgres: writer process',        0.08, 0.09],
+      ['prometheus',     '--storage.tsdb.path=/tank',       0.12, 0.11],
+      ['node_exporter',  '--collector.zfs',                 0.04, 0.02],
+      ['nginx',          'worker process',                  0.05, 0.02],
+      ['pihole-FTL',     '-f',                              0.06, 0.05],
+      ['restic',         'backup /tank/media',              0.20, 0.08],
+      ['systemd',        '--system --deserialize',          0.02, 0.01],
+      ['sshd',           'mpawlowski [priv]',               0.01, 0.01],
+      ['containerd',     '--config /etc/…',                 0.03, 0.03],
+      ['smartd',         '--no-fork',                       0.01, 0.01],
+      ['qbittorrent-nox','--profile=/tank',                 0.09, 0.06],
+      ['python3',        'home-assistant --config',         0.07, 0.10],
+      ['cron',           '-f -P',                           0.01, 0.01],
+      ['zed',            'arc_reclaim',                     0.03, 0.02]
+    ];
+    var procs = procDefs.map(function (d, idx) {
+      return {
+        pid: 600 + idx * 137 + Math.floor(rnd(0, 90)),
+        name: d[0],
+        arg: d[1],
+        cpuBase: d[2],
+        memBase: d[3],
+        cpu: d[2] * 100 + rnd(0, 6),
+        mem: d[3] * 100 + rnd(0, 2),
+        el: null,   // DOM row
+        y: 0
+      };
+    });
+
+    // ====================================================================
+    // Build DOM: core bars + process rows (created once, then mutated)
+    // ====================================================================
+    var coresEl = document.getElementById('cores');
+    var coreFills = [];
+    var coreNums = [];
+    for (var ci = 0; ci < 16; ci++) {
+      var d = document.createElement('div'); d.className = 'core';
+      var num = document.createElement('span'); num.className = 'cnum';
+      num.textContent = (ci < 9 ? '0' : '') + (ci + 1);
+      var track = document.createElement('div'); track.className = 'track';
+      var fill = document.createElement('div'); fill.className = 'fill';
+      track.appendChild(fill);
+      d.appendChild(num); d.appendChild(track);
+      coresEl.appendChild(d);
+      coreFills.push(fill);
+      coreNums.push(num);
+    }
+
+    var rowsEl = document.getElementById('proc-rows');
+    var ROW_H = 17;
+    var VISIBLE_ROWS = 12;
+    procs.forEach(function (p) {
+      var row = document.createElement('div'); row.className = 'prow';
+      row.innerHTML =
+        '<span class="pid"></span>' +
+        '<span class="cmd"></span>' +
+        '<span class="cpu"></span>' +
+        '<span class="mem"></span>' +
+        '<span class="bar"><span></span></span>';
+      rowsEl.appendChild(row);
+      p.el = row;
+      p.pidEl = row.querySelector('.pid');
+      p.cmdEl = row.querySelector('.cmd');
+      p.cpuEl = row.querySelector('.cpu');
+      p.memEl = row.querySelector('.mem');
+      p.barEl = row.querySelector('.bar > span');
+      p.pidEl.textContent = p.pid;
+      p.cmdEl.innerHTML = '<b style="font-weight:600">' + p.name + '</b> <span class="arg">' + p.arg + '</span>';
+    });
+
+    // How many rows actually fit the proc panel — derived from the real layout
+    // box (clientHeight/offsetHeight are pre-transform, so the #stage scale
+    // doesn't skew them). Recomputed on font-load/resize via remeasure().
+    function fitProcRows() {
+      var tableEl = document.getElementById('proc-table');
+      var headEl = document.getElementById('proc-head');
+      if (!tableEl || !headEl) return;
+      var avail = tableEl.clientHeight - headEl.offsetHeight - 2; // 2px = #proc-rows margin-top
+      var n = Math.floor(avail / ROW_H);
+      VISIBLE_ROWS = Math.max(1, Math.min(n, procs.length));
+    }
+
+    // cache simple DOM refs
+    var $ = function (id) { return document.getElementById(id); };
+    var el = {
+      cpuNum: $('cpu-pct-num'), cpuFreq: $('cpu-freq'), cpuLoad: $('cpu-load'), cpuTemp: $('cpu-temp'),
+      ramB: $('ram-bytes'), ramP: $('ram-pct'), ramF: $('ram-fill'),
+      swapB: $('swap-bytes'), swapP: $('swap-pct'), swapF: $('swap-fill'),
+      nvmeB: $('nvme-bytes'), nvmeP: $('nvme-pct'), nvmeF: $('nvme-fill'),
+      tankB: $('tank-bytes'), tankP: $('tank-pct'), tankF: $('tank-fill'),
+      netUpV: $('net-up-val'), netUpU: $('net-up-unit'), netUpT: $('net-up-tot'),
+      netDnV: $('net-down-val'), netDnU: $('net-down-unit'), netDnT: $('net-down-tot'),
+      tbUptime: $('tb-uptime'), tbLoad: $('tb-load'), tbTemp: $('tb-temp'), tbClock: $('tb-clock'),
+      procCount: $('proc-count')
+    };
+
+    // canvases
+    var cpuCanvas = $('cpu-graph');
+    var netCanvas = $('net-graph');
+    var cpuC = setupCanvas(cpuCanvas);
+    var netC = setupCanvas(netCanvas);
+    // re-measure canvases after font/layout settle and on resize of window
+    function remeasure() { cpuC = setupCanvas(cpuCanvas); netC = setupCanvas(netCanvas); fitProcRows(); }
+    addEventListener('resize', remeasure);
+    setTimeout(remeasure, 60);
+    // also remeasure once webfont loads (metrics can shift the layout slightly)
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(remeasure);
+
+    // ====================================================================
+    // GRAPH DRAWING
+    // ====================================================================
+    function drawGrid(ctx, w, h) {
+      ctx.clearRect(0, 0, w, h);
+      // faint vertical + horizontal grid lines behind the graph
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(80,100,135,0.10)';
+      ctx.beginPath();
+      for (var gy = 1; gy < 4; gy++) {
+        var y = Math.round(h * gy / 4) + 0.5;
+        ctx.moveTo(0, y); ctx.lineTo(w, y);
+      }
+      var step = w / 10;
+      for (var gx = 1; gx < 10; gx++) {
+        var x = Math.round(gx * step) + 0.5;
+        ctx.moveTo(x, 0); ctx.lineTo(x, h);
+      }
+      ctx.stroke();
+    }
+
+    // scrolling filled area graph for a single ring (0..1 normalised)
+    function drawAreaCPU(C, ring, phase) {
+      var ctx = C.ctx, w = C.w, h = C.h;
+      drawGrid(ctx, w, h);
+      var n = ring.n;
+      var pad = 2;
+      var usableH = h - pad;
+      // sub-sample fraction for continuous scroll: shift by `phase` of one step
+      var step = w / (n - 1);
+      function px(i) { return i * step - phase * step; }
+      function py(v) { return h - pad - clamp(v, 0, 1) * (usableH - 2); }
+
+      // colour the area by the latest value (cyan->red)
+      var latest = ring.at(n - 1);
+      var col = loadColor(latest);
+
+      // filled area
+      ctx.beginPath();
+      ctx.moveTo(px(0), h);
+      for (var i = 0; i < n; i++) ctx.lineTo(px(i), py(ring.at(i)));
+      ctx.lineTo(px(n - 1), h);
+      ctx.closePath();
+      var grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, rgba(col, 0.42));
+      grad.addColorStop(1, rgba(col, 0.02));
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // top stroke line
+      ctx.beginPath();
+      for (var j = 0; j < n; j++) {
+        var X = px(j), Y = py(ring.at(j));
+        if (j === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+      }
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = rgb(col);
+      ctx.shadowColor = rgba(col, 0.8);
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // dual-series net graph: up (green) + down (blue), autoscaled
+    function drawAreaNet(C, phase) {
+      var ctx = C.ctx, w = C.w, h = C.h;
+      drawGrid(ctx, w, h);
+      var n = net.upHist.n;
+      var pad = 2;
+      var step = w / (n - 1);
+      function px(i) { return i * step - phase * step; }
+      var scale = net.scale;
+      function py(v) { return h - pad - clamp(v / scale, 0, 1) * (h - pad - 2); }
+
+      function series(ring, c, fillTop) {
+        // area
+        ctx.beginPath();
+        ctx.moveTo(px(0), h);
+        for (var i = 0; i < n; i++) ctx.lineTo(px(i), py(ring.at(i)));
+        ctx.lineTo(px(n - 1), h);
+        ctx.closePath();
+        var g = ctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, rgba(c, fillTop));
+        g.addColorStop(1, rgba(c, 0.015));
+        ctx.fillStyle = g;
+        ctx.fill();
+        // line
+        ctx.beginPath();
+        for (var j = 0; j < n; j++) {
+          var X = px(j), Y = py(ring.at(j));
+          if (j === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+        }
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = rgb(c);
+        ctx.shadowColor = rgba(c, 0.7);
+        ctx.shadowBlur = 5;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      // download behind (bigger), upload in front
+      series(net.downHist, [77, 155, 255], 0.30);  // blue
+      series(net.upHist,   [81, 224, 122], 0.26);   // green
+    }
+
+    // ====================================================================
+    // UPDATE FUNCTIONS (throttled by cadence in the rAF loop)
+    // ====================================================================
+
+    // -- CPU cores jitter (~0.9s) --
+    function tickCores() {
+      // overall load wanders with occasional spikes
+      if (Math.random() < 0.12) cpu.target = clamp(cpu.target + rnd(-22, 30), 6, 96);
+      else cpu.target = clamp(cpu.target + rnd(-6, 6), 6, 96);
+      var base = cpu.target / 100;
+      for (var i = 0; i < 16; i++) {
+        // each core orbits the global load with its own noise; a couple run hot
+        var bias = (i % 5 === 0) ? 0.18 : 0;
+        var t = clamp(base + bias + rnd(-0.28, 0.30), 0.02, 1);
+        cpu.coreTarget[i] = t;
+      }
+      cpu.temp = clamp(42 + base * 46 + rnd(-2, 2), 38, 92);
+      cpu.freq = clamp(3.6 + base * 1.1 + rnd(-0.08, 0.08), 2.2, 4.85);
+    }
+
+    // -- gauges drift (~2.2s) --
+    function tickGauges() {
+      gauges.ram.target  = clamp(gauges.ram.target  + rnd(-0.9, 1.0), 8, 30.5);
+      gauges.swap.target = clamp(gauges.swap.target + rnd(-0.15, 0.18), 0, 3.2);
+      gauges.nvme.target = clamp(gauges.nvme.target + rnd(-1.5, 1.8), 300, 700);
+      gauges.tank.target = clamp(gauges.tank.target + rnd(-12, 16), 11000, 18500);
+    }
+
+    // -- net rates (~0.9s target changes; pushed to history each scroll step) --
+    function tickNetTarget() {
+      // download bursty (streaming/restic), upload lighter
+      if (Math.random() < 0.18) net.downTarget = clamp(net.downTarget + rnd(-14, 26), 0.2, 118);
+      else net.downTarget = clamp(net.downTarget + rnd(-4, 4), 0.2, 118);
+      if (Math.random() < 0.15) net.upTarget = clamp(net.upTarget + rnd(-6, 10), 0.05, 42);
+      else net.upTarget = clamp(net.upTarget + rnd(-1.6, 1.6), 0.05, 42);
+    }
+
+    // -- processes re-sort by CPU% (~1.5s) --
+    function tickProcs() {
+      for (var i = 0; i < procs.length; i++) {
+        var p = procs[i];
+        // occasional bursts so the ordering visibly churns
+        var burst = Math.random() < 0.16 ? rnd(0, 38) : 0;
+        var tgt = p.cpuBase * 100 + burst + rnd(-3, 7);
+        p.cpu = clamp(lerp(p.cpu, tgt, 0.6), 0, 99.9);
+        p.mem = clamp(p.mem + rnd(-0.5, 0.55), 0.1, 38);
+      }
+      // sort descending by cpu
+      var order = procs.slice().sort(function (a, b) { return b.cpu - a.cpu; });
+      var total = 0, running = 0;
+      for (var r = 0; r < order.length; r++) {
+        var pr = order[r];
+        total += 1;
+        if (pr.cpu > 1.5) running++;
+        var visible = r < VISIBLE_ROWS;
+        pr.el.style.opacity = visible ? '1' : '0';
+        pr.el.style.transform = 'translateY(' + (r * ROW_H) + 'px)';
+        // text
+        pr.cpuEl.textContent = pr.cpu.toFixed(1);
+        pr.memEl.textContent = pr.mem.toFixed(1);
+        var f = clamp(pr.cpu / 100, 0, 1);
+        pr.barEl.style.width = (f * 100) + '%';
+        var bc = loadColor(f);
+        pr.barEl.style.background = rgb(bc);
+        // row state classes
+        pr.el.className = 'prow' +
+          (r === 0 && pr.cpu > 8 ? ' hot' : '') +
+          (pr.cpu >= 80 ? ' crit' : pr.cpu >= 50 ? ' warn' : '');
+      }
+      el.procCount.textContent = (128 + running) + ' tasks · ' + running + ' running';
+    }
+
+    // ====================================================================
+    // RENDER (smooth, every frame): eased values + DOM/text writes
+    // ====================================================================
+    function renderSmooth(dt) {
+      // ease global cpu pct + each core toward targets
+      cpu.pct = lerp(cpu.pct, cpu.target, clamp(dt * 3.2, 0, 1));
+      cpu.shown = lerp(cpu.shown, cpu.pct, clamp(dt * 6, 0, 1));
+      el.cpuNum.textContent = Math.round(cpu.shown);
+      var gcol = loadColor(cpu.shown / 100);
+      el.cpuNum.parentElement.style.color = rgb([
+        clamp(gcol[0] + 40, 0, 255), clamp(gcol[1] + 30, 0, 255), clamp(gcol[2] + 30, 0, 255)
+      ]);
+
+      for (var i = 0; i < 16; i++) {
+        cpu.cores[i] = lerp(cpu.cores[i], cpu.coreTarget[i], clamp(dt * 4, 0, 1));
+        var c = loadColor(cpu.cores[i]);
+        var f = coreFills[i];
+        f.style.width = (cpu.cores[i] * 100).toFixed(1) + '%';
+        f.style.backgroundColor = rgb(c);
+        f.style.boxShadow = cpu.cores[i] > 0.7 ? '0 0 6px ' + rgba(c, 0.6) : 'none';
+      }
+
+      el.cpuFreq.textContent = cpu.freq.toFixed(2) + ' GHz';
+      el.cpuTemp.textContent = Math.round(cpu.temp) + '°C';
+
+      // net rates ease
+      net.up = lerp(net.up, net.upTarget, clamp(dt * 3, 0, 1));
+      net.down = lerp(net.down, net.downTarget, clamp(dt * 3, 0, 1));
+      writeRate(el.netUpV, el.netUpU, net.up);
+      writeRate(el.netDnV, el.netDnU, net.down);
+
+      // gauges ease + labels
+      easeGauge(gauges.ram,  el.ramB,  el.ramP,  el.ramF,  dt);
+      easeGauge(gauges.swap, el.swapB, el.swapP, el.swapF, dt);
+      easeGauge(gauges.nvme, el.nvmeB, el.nvmeP, el.nvmeF, dt);
+      easeGauge(gauges.tank, el.tankB, el.tankP, el.tankF, dt);
+    }
+
+    function writeRate(valEl, unitEl, mbps) {
+      if (mbps >= 1) { valEl.textContent = mbps.toFixed(1); unitEl.textContent = 'MB/s'; }
+      else { valEl.textContent = Math.round(mbps * 1000); unitEl.textContent = 'KB/s'; }
+    }
+
+    function easeGauge(g, bEl, pEl, fEl, dt) {
+      g.used = lerp(g.used, g.target, clamp(dt * 2.4, 0, 1));
+      var pct = g.used / g.total;
+      var col = loadColor(clamp(pct, 0, 1));
+      fEl.style.width = (clamp(pct, 0, 1) * 100).toFixed(1) + '%';
+      // gradient fill: base accent -> hot end so it reads like btop meters
+      fEl.style.background = 'linear-gradient(90deg,' + g.color + ' 0%,' + rgb(col) + ' 100%)';
+      bEl.textContent = fmtBytes(g.used) + '/' + fmtBytes(g.total);
+      pEl.textContent = Math.round(pct * 100) + '%';
+      pEl.style.color = pct > 0.85 ? '#ff5a6e' : pct > 0.7 ? '#f0b545' : '#cdd8e6';
+    }
+
+    // ====================================================================
+    // TOP BAR (clock + meta)  — cheap, ~every 250ms
+    // ====================================================================
+    var bootMs = Date.now() - (37 * 3600 + 14 * 60) * 1000; // fake ~1d13h uptime, grows
+    function tickTopbar() {
+      var now = new Date();
+      function p2(x) { return (x < 10 ? '0' : '') + x; }
+      el.tbClock.textContent = p2(now.getHours()) + ':' + p2(now.getMinutes()) + ':' + p2(now.getSeconds());
+      var up = Math.floor((Date.now() - bootMs) / 1000);
+      var d = Math.floor(up / 86400), hh = Math.floor((up % 86400) / 3600), mm = Math.floor((up % 3600) / 60);
+      el.tbUptime.textContent = (d > 0 ? d + 'd ' : '') + hh + 'h' + p2(mm) + 'm';
+      var l1 = (cpu.pct / 100 * 14 + rnd(-0.2, 0.2));
+      var loadStr = l1.toFixed(2) + ' ' + (l1 * 0.82).toFixed(2) + ' ' + (l1 * 0.7).toFixed(2);
+      el.tbLoad.textContent = loadStr;
+      el.cpuLoad.textContent = loadStr;        // CPU panel mirrors the top-bar load avg
+      el.tbTemp.textContent = Math.round(cpu.temp) + '°C';
+    }
+
+    // ====================================================================
+    // SINGLE requestAnimationFrame LOOP — each sub-animation has its own cadence
+    // ====================================================================
+    var last = performance.now();
+    var acc = {
+      cores: 0,      coresEvery: 900,    // ms
+      gauges: 0,     gaugesEvery: 2200,
+      netTarget: 0,  netTargetEvery: 900,
+      procs: 0,      procsEvery: 1500,
+      topbar: 0,     topbarEvery: 250,
+      scroll: 0,     scrollEvery: 95     // graph history push cadence (~10.5/s)
+    };
+    // continuous scroll phase 0..1 between history pushes (sub-step interpolation)
+    var scrollPhase = 0;
+
+    // prime an initial pass so nothing starts blank
+    fitProcRows();
+    tickCores(); tickGauges(); tickNetTarget(); tickProcs(); tickTopbar();
+
+    function frame(now) {
+      var dt = (now - last) / 1000;
+      if (dt > 0.1) dt = 0.1; // clamp after tab-switch so eases don't jump
+      last = now;
+
+      // --- cadenced state updates ---
+      acc.cores += dt * 1000;
+      if (acc.cores >= acc.coresEvery) { acc.cores = 0; tickCores(); }
+
+      acc.gauges += dt * 1000;
+      if (acc.gauges >= acc.gaugesEvery) { acc.gauges = 0; tickGauges(); }
+
+      acc.netTarget += dt * 1000;
+      if (acc.netTarget >= acc.netTargetEvery) { acc.netTarget = 0; tickNetTarget(); }
+
+      acc.procs += dt * 1000;
+      if (acc.procs >= acc.procsEvery) { acc.procs = 0; tickProcs(); }
+
+      acc.topbar += dt * 1000;
+      if (acc.topbar >= acc.topbarEvery) { acc.topbar = 0; tickTopbar(); }
+
+      // --- graph history scroll (push newest sample, advance ring) ---
+      acc.scroll += dt * 1000;
+      if (acc.scroll >= acc.scrollEvery) {
+        acc.scroll -= acc.scrollEvery;
+        // push current eased-ish values (with small per-sample noise for texture)
+        cpu.hist.push(clamp(cpu.pct / 100 + rnd(-0.02, 0.02), 0, 1));
+        net.upHist.push(net.up);
+        net.downHist.push(net.down);
+        // autoscale net graph ceiling toward recent peak, ease so it breathes
+        var peak = 1;
+        for (var k = 0; k < net.upHist.n; k++) {
+          var a = net.upHist.at(k), b = net.downHist.at(k);
+          if (a > peak) peak = a; if (b > peak) peak = b;
+        }
+        net.scale = lerp(net.scale, peak * 1.18 + 2, 0.08);
+        // cumulative totals creep up believably (GiB)
+        net.upTot   += net.up   * acc.scrollEvery / 1000 / 1024;
+        net.downTot += net.down * acc.scrollEvery / 1000 / 1024;
+        el.netUpT.textContent   = net.upTot.toFixed(1)   + 'G';
+        el.netDnT.textContent   = net.downTot.toFixed(1) + 'G';
+      }
+      // sub-step phase for smooth continuous scroll between pushes
+      scrollPhase = acc.scroll / acc.scrollEvery;
+
+      // --- per-frame smooth render (eases) ---
+      renderSmooth(dt);
+
+      // --- redraw canvases every frame for continuous scroll ---
+      drawAreaCPU(cpuC, cpu.hist, scrollPhase);
+      drawAreaNet(netC, scrollPhase);
+
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+  })();
+  </script>
+</body>
+</html>

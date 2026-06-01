@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>homelab // agents on duty</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    cursor: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Fixed 1280x400 logical stage, scaled by JS to fill viewport, letterboxed on black. */
+  #stage {
+    position: relative;
+    flex-shrink: 0;            /* never shrink below 1280×400 in a narrow viewport */
+    width: 1280px;
+    height: 400px;
+    transform-origin: center center;
+    background: #020803;
+    overflow: hidden;
+  }
+  /* Low-res backing canvas (426x133) upscaled by CSS -> crisp chunky pixels. */
+  #scene {
+    position: absolute;
+    inset: 0;
+    width: 1280px;
+    height: 400px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+  }
+  /* CRT overlay layer sits ON TOP of the canvas (crisp scanlines + vignette). */
+  #crt {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    /* hard scanlines every 3 device px so they read crisply at 1280x400 */
+    background-image: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0.32) 3px,
+      rgba(0, 0, 0, 0.32) 4px
+    );
+    mix-blend-mode: multiply;
+  }
+  /* vignette + subtle screen-curvature darkening at the corners */
+  #vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(120% 130% at 50% 50%,
+        rgba(0, 0, 0, 0) 58%,
+        rgba(0, 0, 0, 0.35) 82%,
+        rgba(0, 0, 0, 0.72) 100%);
+  }
+  /* faint phosphor wash so the whole tube has a green cast */
+  #tint {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(140% 150% at 50% 42%,
+      rgba(93, 255, 139, 0.05) 0%,
+      rgba(93, 255, 139, 0.015) 45%,
+      rgba(0, 0, 0, 0) 75%);
+    mix-blend-mode: screen;
+  }
+  /* slow rolling horizontal band, animated in CSS so it costs no JS/frame */
+  #roll {
+    position: absolute;
+    left: 0; right: 0;
+    height: 130px;
+    pointer-events: none;
+    background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(180, 255, 200, 0.045) 50%,
+      rgba(255, 255, 255, 0) 100%);
+    mix-blend-mode: screen;
+    animation: rollband 9.5s linear infinite;
+  }
+  @keyframes rollband {
+    0%   { transform: translateY(-150px); }
+    100% { transform: translateY(420px); }
+  }
+  /* global flicker: tiny brightness wobble driven entirely by CSS keyframes */
+  #stage { animation: flick 5.4s steps(1, end) infinite; }
+  @keyframes flick {
+    0%, 100% { filter: brightness(1.00); }
+    7%       { filter: brightness(0.97); }
+    8%       { filter: brightness(1.02); }
+    9%       { filter: brightness(0.99); }
+    38%      { filter: brightness(1.015); }
+    39%      { filter: brightness(0.985); }
+    62%      { filter: brightness(1.00); }
+    77%      { filter: brightness(0.965); }
+    78%      { filter: brightness(1.025); }
+    79%      { filter: brightness(1.00); }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene" width="426" height="133"></canvas>
+    <div id="tint"></div>
+    <div id="roll"></div>
+    <div id="crt"></div>
+    <div id="vignette"></div>
+  </div>
+
+<script>
+"use strict";
+(function () {
+  // -------------------------------------------------------------------------
+  // STAGE FIT — fixed 1280x400 logical canvas, scaled to fill, letterboxed.
+  // -------------------------------------------------------------------------
+  var stage = document.getElementById("stage");
+  function fit() {
+    var s = Math.min(window.innerWidth / 1280, window.innerHeight / 400);
+    stage.style.transform = "scale(" + s + ")";
+  }
+  window.addEventListener("resize", fit);
+  fit();
+
+  // -------------------------------------------------------------------------
+  // BACKING BUFFER — 426x133 (3.2:1) chunky-pixel canvas, no smoothing.
+  // -------------------------------------------------------------------------
+  var BW = 426, BH = 133;
+  var cv = document.getElementById("scene");
+  var ctx = cv.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+
+  // -------------------------------------------------------------------------
+  // PALETTE — phosphor green on near-black; agents have colored visors/emblems.
+  // -------------------------------------------------------------------------
+  var C = {
+    bg:      "#020803",
+    bgRack:  "#04130a",
+    bgRack2: "#061a0d",
+    floor:   "#031007",
+    grid:    "#0a3a1e",
+    gridLo:  "#072515",
+    phos:    "#5dff8b",   // primary phosphor green
+    phosDim: "#2f9a55",
+    phosLo:  "#176c34",
+    phosFaint:"#0e4422",
+    white:   "#cfffe0",
+    amber:   "#ffb347",
+    amberDim:"#a8702a",
+    cyan:    "#46e8ff",   // ATLAS
+    green:   "#7dff9a",   // ARGUS
+    magenta: "#ff5ce0",   // VESTA
+    netblue: "#7fb8ff"    // HERMES packet
+  };
+
+  // ledColor: rack unit LEDs in a few green shades + rare amber
+  var LED_COLORS = ["#0e4422", "#176c34", "#2f9a55", "#5dff8b", "#9bffba"];
+
+  // -------------------------------------------------------------------------
+  // 4x6 BITMAP PIXEL FONT — plotted as hard 1px cells so it stays crisp
+  // through the nearest-neighbour upscale (matches the project's font engine).
+  // Each glyph = 6 rows; each row is a 4-bit mask, bit 3 (8) = leftmost column.
+  // -------------------------------------------------------------------------
+  var FW = 4, FH = 6, ADV = 5;
+  var GLY = {
+    " ": [0,0,0,0,0,0],
+    "!": [0b0100,0b0100,0b0100,0b0100,0,0b0100],
+    "%": [0b1001,0b0001,0b0010,0b0100,0b1000,0b1001],
+    "+": [0,0b0100,0b1110,0b0100,0,0],
+    "-": [0,0,0,0b1110,0,0],
+    ".": [0,0,0,0,0,0b0100],
+    ",": [0,0,0,0,0b0100,0b1000],
+    "/": [0b0001,0b0001,0b0010,0b0100,0b1000,0b1000],
+    ":": [0,0b0100,0,0,0b0100,0],
+    "·": [0,0,0b0110,0b0110,0,0],
+    "?": [0b1110,0b0001,0b0010,0b0100,0,0b0100],
+    "#": [0b1010,0b1111,0b1010,0b1111,0b1010,0],
+    "(": [0b0010,0b0100,0b0100,0b0100,0b0100,0b0010],
+    ")": [0b0100,0b0010,0b0010,0b0010,0b0010,0b0100],
+    "*": [0,0b1010,0b0100,0b1010,0,0],
+    "=": [0,0b1110,0,0b1110,0,0],
+    "✓": [0,0b0001,0b0001,0b1010,0b1010,0b0100], // check mark
+    "0": [0b0110,0b1001,0b1011,0b1101,0b1001,0b0110],
+    "1": [0b0100,0b1100,0b0100,0b0100,0b0100,0b1110],
+    "2": [0b0110,0b1001,0b0010,0b0100,0b1000,0b1111],
+    "3": [0b1110,0b0001,0b0110,0b0001,0b1001,0b0110],
+    "4": [0b0010,0b0110,0b1010,0b1111,0b0010,0b0010],
+    "5": [0b1111,0b1000,0b1110,0b0001,0b1001,0b0110],
+    "6": [0b0110,0b1000,0b1110,0b1001,0b1001,0b0110],
+    "7": [0b1111,0b0001,0b0010,0b0100,0b0100,0b0100],
+    "8": [0b0110,0b1001,0b0110,0b1001,0b1001,0b0110],
+    "9": [0b0110,0b1001,0b1001,0b0111,0b0001,0b0110],
+    "A": [0b0110,0b1001,0b1001,0b1111,0b1001,0b1001],
+    "B": [0b1110,0b1001,0b1110,0b1001,0b1001,0b1110],
+    "C": [0b0110,0b1001,0b1000,0b1000,0b1001,0b0110],
+    "D": [0b1110,0b1001,0b1001,0b1001,0b1001,0b1110],
+    "E": [0b1111,0b1000,0b1110,0b1000,0b1000,0b1111],
+    "F": [0b1111,0b1000,0b1110,0b1000,0b1000,0b1000],
+    "G": [0b0110,0b1001,0b1000,0b1011,0b1001,0b0111],
+    "H": [0b1001,0b1001,0b1111,0b1001,0b1001,0b1001],
+    "I": [0b1110,0b0100,0b0100,0b0100,0b0100,0b1110],
+    "J": [0b0011,0b0001,0b0001,0b0001,0b1001,0b0110],
+    "K": [0b1001,0b1010,0b1100,0b1100,0b1010,0b1001],
+    "L": [0b1000,0b1000,0b1000,0b1000,0b1000,0b1111],
+    "M": [0b1001,0b1111,0b1111,0b1001,0b1001,0b1001],
+    "N": [0b1001,0b1101,0b1011,0b1001,0b1001,0b1001],
+    "O": [0b0110,0b1001,0b1001,0b1001,0b1001,0b0110],
+    "P": [0b1110,0b1001,0b1001,0b1110,0b1000,0b1000],
+    "Q": [0b0110,0b1001,0b1001,0b1001,0b1010,0b0111],
+    "R": [0b1110,0b1001,0b1001,0b1110,0b1010,0b1001],
+    "S": [0b0111,0b1000,0b0110,0b0001,0b1001,0b1110],
+    "T": [0b1111,0b0100,0b0100,0b0100,0b0100,0b0100],
+    "U": [0b1001,0b1001,0b1001,0b1001,0b1001,0b0110],
+    "V": [0b1001,0b1001,0b1001,0b1001,0b0110,0b0110],
+    "W": [0b1001,0b1001,0b1001,0b1111,0b1111,0b1001],
+    "X": [0b1001,0b1001,0b0110,0b0110,0b1001,0b1001],
+    "Y": [0b1001,0b1001,0b0110,0b0100,0b0100,0b0100],
+    "Z": [0b1111,0b0001,0b0010,0b0100,0b1000,0b1111]
+  };
+  function glyph(ch) { return GLY[ch] || GLY["?"]; }
+
+  // Draw bitmap text. align: 'left' | 'center' | 'right'. Returns nothing.
+  function txt(str, x, y, color, align) {
+    str = String(str).toUpperCase();
+    var total = str.length * ADV - 1; if (total < 0) total = 0;
+    if (align === "center") x -= (total >> 1);
+    else if (align === "right") x -= total;
+    x = x | 0; y = y | 0;
+    ctx.fillStyle = color;
+    for (var i = 0; i < str.length; i++) {
+      var g = glyph(str.charAt(i));
+      var gx = x + i * ADV;
+      for (var r = 0; r < FH; r++) {
+        var bits = g[r]; if (!bits) continue;
+        for (var c = 0; c < FW; c++) {
+          if (bits & (1 << (FW - 1 - c))) ctx.fillRect(gx + c, y + r, 1, 1);
+        }
+      }
+    }
+  }
+  function txtWidth(str) { return String(str).length * ADV - 1; }
+
+  // -------------------------------------------------------------------------
+  // 12x16 HOODED AGENT SPRITE — drawn as a pixel mask, palette-swappable.
+  // Mask codes per cell: 0 empty, 1 robe, 2 robe-shade, 3 hood, 4 visor.
+  // Two leg frames (for HERMES) swap the bottom two rows.
+  // -------------------------------------------------------------------------
+  // Base body (rows 0..13). Legs added per-frame below.
+  var AGENT = [
+    "....3333....",
+    "...333333...",
+    "..33444433..",  // hood opening + visor band
+    "..34444443..",
+    "..33444433..",
+    "..333113....",  // hood meets robe / little arm nub
+    ".1111111111.",
+    ".1112112111.",
+    ".1111111111.",
+    ".1111111111.",
+    ".1121112111.",
+    ".1111111111.",
+    ".1111111111.",
+    ".11111111111"
+  ];
+  // Two stance frames: idle (feet together) and walk (feet split). Each = 2 rows.
+  var LEGS_IDLE = [
+    "..11....11..",
+    "..22....22.."
+  ];
+  var LEGS_WALK_A = [
+    ".11......11.",
+    "11........11"
+  ];
+  var LEGS_WALK_B = [
+    "...11..11...",
+    "..22....22.."
+  ];
+
+  // Render a 12x16 agent at integer (px,py) top-left.
+  // pal = { robe, shade, hood, visor }. legs = array of 2 strings.
+  function drawAgent(px, py, pal, legs, dim) {
+    var rows = AGENT;
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      for (var c = 0; c < 12; c++) {
+        var code = row.charCodeAt(c) - 48; // '0'..'4'
+        if (code <= 0) continue;
+        var col;
+        if (code === 1) col = pal.robe;
+        else if (code === 2) col = pal.shade;
+        else if (code === 3) col = pal.hood;
+        else col = pal.visor;
+        ctx.fillStyle = col;
+        ctx.fillRect(px + c, py + r, 1, 1);
+      }
+    }
+    // legs occupy rows 14,15
+    for (var lr = 0; lr < 2; lr++) {
+      var lrow = legs[lr];
+      for (var lc = 0; lc < 12; lc++) {
+        var lcode = lrow.charCodeAt(lc) - 48;
+        if (lcode <= 0) continue;
+        ctx.fillStyle = (lcode === 2) ? pal.shade : pal.robe;
+        ctx.fillRect(px + lc, py + 14 + lr, 1, 1);
+      }
+    }
+    // tiny visor glow pixel (additive feel via bright accent)
+    if (!dim) {
+      ctx.fillStyle = pal.visor;
+      ctx.fillRect(px + 5, py + 3, 2, 1);
+    }
+  }
+
+  // Palette builders (robe greens, swapped visor/hood accent per agent).
+  function agentPal(accent, robe, shade, hood) {
+    return { robe: robe, shade: shade, hood: hood, visor: accent };
+  }
+
+  // -------------------------------------------------------------------------
+  // MOCK DATA STORE — drifts every ~1.4s, loops forever. No memory growth.
+  // -------------------------------------------------------------------------
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function walk(v, lo, hi, step) { return clamp(v + rnd(-step, step), lo, hi); }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  var store = {
+    reqs: 1180,          // network req/s (HERMES)
+    scrub: 61,           // zpool scrub %  (ATLAS)
+    temp: 47,            // pool temp C
+    cpu: 22,             // proxmox cpu %
+    containers: 24,      // docker container count
+    power: 168,          // power draw W
+    bootMs: Date.now() - (12 * 86400 + 4 * 3600 + 33 * 60) * 1000
+  };
+
+  function fmtUptime() {
+    var s = Math.floor((Date.now() - store.bootMs) / 1000);
+    var d = Math.floor(s / 86400); s -= d * 86400;
+    var h = Math.floor(s / 3600); s -= h * 3600;
+    var m = Math.floor(s / 60); s -= m * 60;
+    return d + "D " + pad2(h) + ":" + pad2(m) + ":" + pad2(s);
+  }
+
+  // Drift the numbers on a ~1.4s cadence.
+  function driftData() {
+    store.reqs = Math.round(walk(store.reqs, 420, 2400, 180));
+    store.scrub = clamp(store.scrub + rnd(0.4, 1.6), 0, 100);
+    if (store.scrub >= 100) store.scrub = rnd(2, 8); // finish -> new scrub starts
+    store.temp = +walk(store.temp, 41, 58, 1.1).toFixed(0);
+    store.cpu = Math.round(walk(store.cpu, 6, 78, 9));
+    store.power = Math.round(walk(store.power, 142, 205, 6));
+    if (Math.random() < 0.07) store.containers = clamp(store.containers + (Math.random() < 0.5 ? -1 : 1), 21, 29);
+  }
+
+  // -------------------------------------------------------------------------
+  // META LINE — cycles header status (uptime / containers / power).
+  // -------------------------------------------------------------------------
+  var metaIdx = 0;
+  function metaLine() {
+    switch (metaIdx % 4) {
+      case 0: return "UPTIME " + fmtUptime();
+      case 1: return "CONTAINERS " + store.containers + " RUNNING";
+      case 2: return "POWER DRAW " + store.power + "W · 12 NODES";
+      default: return "LOAD " + store.cpu + "% · NET " + store.reqs + " R/S";
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // AGENTS — three stationary watchers + their live status line pools.
+  // Each agent owns a typewriter state machine, staggered in phase.
+  // WARN lines occasionally injected (amber).
+  // -------------------------------------------------------------------------
+  function makeAgent(name, x, pal, lines, warns) {
+    return {
+      name: name, x: x, pal: pal,
+      lines: lines, warns: warns,
+      // typewriter
+      txtFull: "", shown: 0,
+      phase: "type",        // type -> hold -> erase
+      acc: 0, holdFor: 2.6,
+      warn: false,
+      bobPhase: Math.random() * Math.PI * 2
+    };
+  }
+
+  // Status line generators read live store values each time a line is picked.
+  var atlasLines = [
+    function () { return "ZPOOL SCRUB " + Math.round(store.scrub) + "%"; },
+    function () { return "POOL TEMP " + store.temp + "C"; },
+    function () { return "SMART CHECK OK"; },
+    function () { return "DISK ARRAY HEALTHY"; },
+    function () { return "RESILVER IDLE"; }
+  ];
+  var atlasWarns = [
+    function () { return "WARN DISK 82%"; },
+    function () { return "WARN SMART SDB"; }
+  ];
+  var argusLines = [
+    function () { return "ALL PROBES GREEN"; },
+    function () { return "CPU " + store.cpu + "% NOMINAL"; },
+    function () { return "12 NODES UP"; },
+    function () { return "PI-HOLE OK"; },
+    function () { return "LATENCY 4MS"; }
+  ];
+  var argusWarns = [
+    function () { return "WARN TEMP 71C"; },
+    function () { return "WARN CPU SPIKE"; }
+  ];
+  var vestaLines = [
+    function () { return "BACKUP ✓ 02:00"; },
+    function () { return "RESTIC SNAP OK"; },
+    function () { return "SNAPSHOT 14/14"; },
+    function () { return "OFFSITE SYNCED"; },
+    function () { return "PRUNE COMPLETE"; }
+  ];
+  var vestaWarns = [
+    function () { return "WARN BACKUP LATE"; },
+    function () { return "WARN RETRY 1/3"; }
+  ];
+
+  // Agent x positions are the rack centers on the buffer (set during layout).
+  var RACKS_X = [78, 196, 314];   // three rack columns
+  var FLOOR_Y = 104;              // floor line on the buffer
+  var agents = [
+    makeAgent("ATLAS", RACKS_X[0], agentPal(C.cyan,    "#1c7d40", "#0f4f28", "#0f4f28"), atlasLines, atlasWarns),
+    makeAgent("ARGUS", RACKS_X[1], agentPal(C.green,   "#1c7d40", "#0f4f28", "#0f4f28"), argusLines, argusWarns),
+    makeAgent("VESTA", RACKS_X[2], agentPal(C.magenta, "#1c7d40", "#0f4f28", "#0f4f28"), vestaLines, vestaWarns)
+  ];
+
+  // Stagger the typewriters so they don't move in unison.
+  agents[0].acc = 0.0; agents[0].holdFor = 2.4;
+  agents[1].acc = -1.1; agents[1].holdFor = 2.9;
+  agents[2].acc = -2.2; agents[2].holdFor = 2.2;
+
+  function pickLine(a) {
+    // ~14% chance of a WARN line; else a normal status line.
+    if (Math.random() < 0.14) {
+      a.warn = true;
+      return a.warns[(Math.random() * a.warns.length) | 0]();
+    }
+    a.warn = false;
+    return a.lines[(Math.random() * a.lines.length) | 0]();
+  }
+  // seed first lines
+  agents.forEach(function (a) { a.txtFull = pickLine(a); });
+
+  var TYPE_MS = 0.052; // seconds per character revealed
+  function tickAgent(a, dt) {
+    a.acc += dt;
+    if (a.phase === "type") {
+      var want = Math.floor(a.acc / TYPE_MS);
+      if (want >= a.txtFull.length) {
+        a.shown = a.txtFull.length;
+        a.phase = "hold"; a.acc = 0;
+      } else {
+        a.shown = want;
+      }
+    } else if (a.phase === "hold") {
+      if (a.acc >= a.holdFor) { a.phase = "erase"; a.acc = 0; }
+    } else { // erase
+      var rem = a.txtFull.length - Math.floor(a.acc / (TYPE_MS * 0.6));
+      if (rem <= 0) {
+        a.shown = 0; a.phase = "type"; a.acc = 0;
+        a.txtFull = pickLine(a);
+        a.holdFor = rnd(2.0, 3.1);
+      } else {
+        a.shown = rem;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // HERMES — walks the floor left<->right, 2-frame leg cycle, glowing packet.
+  // -------------------------------------------------------------------------
+  var hermes = {
+    pal: agentPal(C.netblue, "#176c5a", "#0c4438", "#0c4438"),
+    minX: 18, maxX: BW - 30,
+    t: 0,            // 0..1 eased position param
+    dir: 1,
+    speed: 0.085,    // param units / sec
+    step: 0,         // walk frame accumulator
+    frame: 0
+  };
+
+  function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+  function tickHermes(dt) {
+    hermes.t += hermes.dir * hermes.speed * dt;
+    if (hermes.t >= 1) { hermes.t = 1; hermes.dir = -1; }
+    else if (hermes.t <= 0) { hermes.t = 0; hermes.dir = 1; }
+    hermes.step += dt;
+    if (hermes.step >= 0.16) { hermes.step = 0; hermes.frame ^= 1; }
+  }
+
+  // -------------------------------------------------------------------------
+  // RACK LED FIELD — precomputed grid of unit LEDs; each blinks on its own
+  // pseudo-random cadence. Stored once (no per-frame allocation).
+  // -------------------------------------------------------------------------
+  var racks = [];   // {x,y,w,h, leds:[{x,y,base,phase,rate,amber}]}
+  (function buildRacks() {
+    var rackW = 96, rackH = 70, top = 24;
+    for (var ri = 0; ri < RACKS_X.length; ri++) {
+      var cx = RACKS_X[ri];
+      var rx = cx - (rackW >> 1);
+      var rack = { x: rx, y: top, w: rackW, h: rackH, leds: [] };
+      // rows of 1U units; each unit has a couple of status LEDs on the left
+      var unitH = 5, pad = 4;
+      var rows = Math.floor((rackH - pad * 2) / unitH);
+      for (var u = 0; u < rows; u++) {
+        var uy = top + pad + u * unitH + 1;
+        // 3 LEDs per unit near the left edge
+        for (var k = 0; k < 3; k++) {
+          var amber = Math.random() < 0.04;
+          rack.leds.push({
+            x: rx + 5 + k * 3,
+            y: uy,
+            base: (Math.random() * 5) | 0,
+            phase: Math.random() * 6.28,
+            rate: rnd(0.6, 2.4),
+            amber: amber
+          });
+        }
+        // a faint activity bar on the right of each unit
+        rack.leds.push({
+          x: rx + rackW - 7,
+          y: uy,
+          base: 1,
+          phase: Math.random() * 6.28,
+          rate: rnd(1.0, 3.0),
+          amber: false,
+          bar: true
+        });
+      }
+      racks.push(rack);
+    }
+  })();
+
+  // -------------------------------------------------------------------------
+  // FLOOR PERSPECTIVE — static receding lines, cached. Drawn each frame but
+  // cheap (a handful of fillRect rows). Vanishing point near center horizon.
+  // -------------------------------------------------------------------------
+  var VP_X = BW / 2, VP_Y = 96; // vanishing point
+  function drawFloor() {
+    // floor fill
+    ctx.fillStyle = C.floor;
+    ctx.fillRect(0, FLOOR_Y - 6, BW, BH - (FLOOR_Y - 6));
+    // horizontal receding lines (denser near horizon)
+    var ys = [100, 106, 113, 122, 132];
+    for (var i = 0; i < ys.length; i++) {
+      ctx.fillStyle = (i < 2) ? C.gridLo : C.grid;
+      ctx.fillRect(0, ys[i], BW, 1);
+    }
+    // converging verticals toward the vanishing point
+    ctx.fillStyle = C.gridLo;
+    var cols = [-180, -110, -55, 0, 55, 110, 180];
+    for (var c = 0; c < cols.length; c++) {
+      var bx = VP_X + cols[c];
+      // draw a sparse dotted line from floor front up toward VP
+      for (var yy = BH - 1; yy >= FLOOR_Y; yy -= 2) {
+        var f = (yy - VP_Y) / (BH - VP_Y);          // 0 at VP .. 1 at front
+        var xx = Math.round(VP_X + (bx - VP_X) * f);
+        if (xx >= 0 && xx < BW) ctx.fillRect(xx, yy, 1, 1);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // RENDER HELPERS
+  // -------------------------------------------------------------------------
+  function fillRectSafe(x, y, w, h, col) {
+    ctx.fillStyle = col;
+    ctx.fillRect(x | 0, y | 0, w | 0, h | 0);
+  }
+
+  // additive-ish glow: stack a few translucent rects via 'lighter'
+  function glowDot(x, y, col, r) {
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = col;
+    ctx.fillRect(x - r, y, r * 2 + 1, 1);
+    ctx.fillRect(x, y - r, 1, r * 2 + 1);
+    ctx.globalAlpha = 0.28;
+    ctx.fillRect(x - r, y - r, r * 2 + 1, r * 2 + 1);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function drawRacks(now) {
+    for (var ri = 0; ri < racks.length; ri++) {
+      var R = racks[ri];
+      // rack chassis (dark, with a slightly lighter front bezel + feet)
+      fillRectSafe(R.x - 2, R.y - 2, R.w + 4, R.h + 6, "#020c06");
+      fillRectSafe(R.x, R.y, R.w, R.h, C.bgRack);
+      // top + bottom rails a touch brighter
+      fillRectSafe(R.x, R.y, R.w, 2, C.bgRack2);
+      fillRectSafe(R.x, R.y + R.h - 2, R.w, 2, C.bgRack2);
+      // faint unit separators
+      ctx.fillStyle = "#03100a";
+      for (var sy = R.y + 4; sy < R.y + R.h - 3; sy += 5) {
+        ctx.fillRect(R.x + 2, sy + 4, R.w - 4, 1);
+      }
+      // LEDs
+      var leds = R.leds;
+      for (var i = 0; i < leds.length; i++) {
+        var L = leds[i];
+        var tw = 0.5 + 0.5 * Math.sin(now * L.rate + L.phase);
+        if (L.bar) {
+          // activity bar: width pulses
+          var w = 1 + Math.round(tw * 4);
+          ctx.fillStyle = (tw > 0.7) ? C.phos : C.phosLo;
+          ctx.fillRect(L.x - w + 1, L.y, w, 1);
+        } else {
+          var lvl;
+          if (L.amber) {
+            ctx.fillStyle = tw > 0.55 ? C.amber : C.amberDim;
+          } else {
+            // map brightness to a phosphor shade
+            lvl = Math.min(4, Math.max(0, L.base + Math.round(tw * 2) - 1));
+            ctx.fillStyle = LED_COLORS[lvl];
+          }
+          ctx.fillRect(L.x, L.y, 1, 1);
+        }
+      }
+      // domain nameplate ABOVE each rack (a bay sign) — clear of the agents
+      var labels = ["STORAGE", "MONITOR", "BACKUP"];
+      txt(labels[ri], R.x + (R.w >> 1), R.y - 8, C.phosLo, "center");
+    }
+  }
+
+  // Speech bubble with pixel border + typewriter text + blinking cursor tail.
+  function drawBubble(cx, topY, str, accent, warn, blink) {
+    var shown = str;
+    var w = txtWidth(shown);
+    // include room for the trailing cursor block
+    var inW = Math.max(w + 6, 18);
+    var inH = FH + 4;
+    var bx = Math.round(cx - inW / 2);
+    var by = topY;
+    // clamp horizontally into the buffer
+    if (bx < 3) bx = 3;
+    if (bx + inW > BW - 3) bx = BW - 3 - inW;
+
+    var border = warn ? C.amber : accent;
+    var fill = "#03130a";
+    // body
+    fillRectSafe(bx, by, inW, inH, fill);
+    // 1px border (top/bottom/left/right)
+    ctx.fillStyle = border;
+    ctx.fillRect(bx, by, inW, 1);
+    ctx.fillRect(bx, by + inH - 1, inW, 1);
+    ctx.fillRect(bx, by, 1, inH);
+    ctx.fillRect(bx + inW - 1, by, 1, inH);
+    // little tail pointing down toward the agent's head
+    var tailX = clamp(Math.round(cx), bx + 3, bx + inW - 4);
+    ctx.fillStyle = border;
+    ctx.fillRect(tailX, by + inH, 1, 1);
+    ctx.fillRect(tailX - 1, by + inH, 3, 1);
+    ctx.fillStyle = fill;
+    ctx.fillRect(tailX, by + inH - 1, 1, 1);
+    // text
+    var tcol = warn ? C.amber : C.white;
+    txt(shown, bx + 3, by + 2, tcol);
+    // blinking cursor block right after the text while typing/holding
+    if (blink) {
+      ctx.fillStyle = warn ? C.amber : accent;
+      ctx.fillRect(bx + 3 + (w > 0 ? w + 1 : 0), by + 2, 2, FH);
+    }
+    // warn sprites: tiny corner blink
+    if (warn) {
+      ctx.fillStyle = C.amber;
+      ctx.fillRect(bx + 2, by - 2, 1, 1);
+      ctx.fillRect(bx + inW - 3, by - 2, 1, 1);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // HEADER BAR — title + blinking cursor + cycling meta line.
+  // -------------------------------------------------------------------------
+  function drawHeader(now, cursorOn) {
+    // bar background
+    fillRectSafe(0, 0, BW, 11, "#03100a");
+    fillRectSafe(0, 11, BW, 1, C.phosFaint);
+    // title
+    var title = "HOMELAB // AGENTS ON DUTY";
+    txt(title, 4, 3, C.phos);
+    if (cursorOn) {
+      ctx.fillStyle = C.phos;
+      ctx.fillRect(4 + txtWidth(title) + 2, 3, 3, FH);
+    }
+    // meta line, right-aligned, with a small leading marker
+    var meta = metaLine();
+    txt(meta, BW - 4, 3, C.phosDim, "right");
+    // a couple of decorative phosphor ticks on the divider
+    ctx.fillStyle = C.phosLo;
+    for (var x = 6; x < BW; x += 24) ctx.fillRect(x, 11, 1, 1);
+  }
+
+  // -------------------------------------------------------------------------
+  // SCANLINE/NOISE on the buffer itself (very light) — most CRT work is the
+  // CSS overlay; here we add only faint per-frame phosphor speckle so the
+  // tube never looks perfectly still. Capped + cheap.
+  // -------------------------------------------------------------------------
+  var speckle = [];
+  for (var sp = 0; sp < 24; sp++) speckle.push({ x: 0, y: 0, on: false });
+  function drawSpeckle() {
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = 0; i < speckle.length; i++) {
+      var s = speckle[i];
+      if (Math.random() < 0.5) {
+        s.x = (Math.random() * BW) | 0;
+        s.y = (12 + Math.random() * (BH - 12)) | 0;
+      }
+      ctx.globalAlpha = Math.random() * 0.06;
+      ctx.fillStyle = C.phos;
+      ctx.fillRect(s.x, s.y, 1, 1);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // -------------------------------------------------------------------------
+  // MAIN LOOP — single rAF; each sub-animation throttled by its own timestamp.
+  // -------------------------------------------------------------------------
+  var last = 0;
+  var tData = 0, tMeta = 0;
+  var blinkT = 0, headCursor = true, bubbleBlink = true;
+  var nowSec = 0;
+
+  function frame(ms) {
+    requestAnimationFrame(frame);
+    if (!last) last = ms;
+    var dt = (ms - last) / 1000;
+    last = ms;
+    if (dt > 0.1) dt = 0.1;       // clamp after tab-away; no giant jumps
+    nowSec += dt;
+
+    // --- data drift @ ~1.4s ---
+    tData += dt;
+    if (tData >= 1.4) { tData = 0; driftData(); }
+
+    // --- meta line cycle @ ~3.4s ---
+    tMeta += dt;
+    if (tMeta >= 3.4) { tMeta = 0; metaIdx++; }
+
+    // --- cursor / bubble blink @ ~0.5s ---
+    blinkT += dt;
+    if (blinkT >= 0.5) { blinkT = 0; headCursor = !headCursor; bubbleBlink = !bubbleBlink; }
+
+    // --- continuous updates (every frame, cheap) ---
+    for (var i = 0; i < agents.length; i++) tickAgent(agents[i], dt);
+    tickHermes(dt);
+
+    // =================== DRAW ===================
+    // clear to background
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, BW, BH);
+
+    // back wall faint glow gradient (cheap: a few bands)
+    fillRectSafe(0, 12, BW, 18, "#030f08");
+
+    drawRacks(nowSec);
+    drawFloor();
+
+    // stationary agents at their racks with idle bob
+    for (var a = 0; a < agents.length; a++) {
+      var ag = agents[a];
+      var bob = Math.round(Math.sin(nowSec * 1.6 + ag.bobPhase) * 1);
+      var ax = ag.x - 6;                 // center the 12px sprite
+      var ay = FLOOR_Y - 16 + bob;       // feet on floor line
+      drawAgent(ax, ay, ag.pal, LEGS_IDLE, false);
+      // name tag under feet
+      txt(ag.name, ag.x, FLOOR_Y + 2 + (bob > 0 ? 0 : 0), ag.pal.visor, "center");
+
+      // speech bubble: only render the typed substring
+      var shown = ag.txtFull.substring(0, ag.shown);
+      // show cursor while typing or holding; hide during erase tail end
+      var showCur = (ag.phase !== "erase") && bubbleBlink;
+      if (shown.length > 0 || ag.phase === "type") {
+        drawBubble(ag.x, ay - 10, shown, ag.pal.visor, ag.warn, showCur);
+      }
+    }
+
+    // HERMES walking the floor with the glowing packet
+    (function () {
+      var e = easeInOut(hermes.t);
+      var hx = Math.round(hermes.minX + (hermes.maxX - hermes.minX) * e);
+      var walkBob = (hermes.frame === 0) ? 0 : -1;
+      var hy = FLOOR_Y - 16 + walkBob;
+      var legs = hermes.frame === 0 ? LEGS_WALK_A : LEGS_WALK_B;
+      // facing: flip not needed for hooded sprite; packet side follows dir
+      drawAgent(hx, hy, hermes.pal, legs, false);
+      // glowing packet bobs in "hand"
+      var pkSide = hermes.dir > 0 ? 12 : -2;
+      var pkX = hx + pkSide;
+      var pkY = hy + 8 + Math.round(Math.sin(nowSec * 6) * 1);
+      glowDot(pkX, pkY, C.netblue, 2);
+      ctx.fillStyle = C.white;
+      ctx.fillRect(pkX, pkY, 1, 1);
+      // HERMES label + live req/s float above
+      txt("HERMES", hx + 6, hy + 18, C.netblue, "center");
+      var rb = "ROUTING " + store.reqs + " R/S";
+      // small bubble for hermes too, staggered/always-on short line
+      drawBubble(hx + 6, hy - 10, rb, C.netblue, false, bubbleBlink);
+    })();
+
+    // faint moving speckle (kept very subtle) — every frame but tiny
+    drawSpeckle();
+
+    // header bar drawn last so it stays crisp on top (title + cursor + meta)
+    drawHeader(nowSec, headCursor);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

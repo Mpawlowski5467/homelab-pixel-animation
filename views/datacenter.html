@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>node-01 // datacenter floor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    cursor: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Share Tech Mono", "VT323", monospace;
+  }
+  /* Fixed 1280x400 logical stage, scaled by JS to fill viewport, letterboxed on black. */
+  #stage {
+    position: relative;
+    flex-shrink: 0;            /* never shrink below 1280×400 in a narrow viewport */
+    width: 1280px;
+    height: 400px;
+    transform-origin: center center;
+    background: #020803;
+    overflow: hidden;
+  }
+  /* High-DPI scene canvas (logical 1280×400). NO image-rendering:pixelated here —
+     text must stay smooth; the pixel-art feel comes from hard-edged filled rects. */
+  #scene {
+    position: absolute;
+    inset: 0;
+    width: 1280px;
+    height: 400px;
+    display: block;
+  }
+  /* CRT overlay layer sits ON TOP of the canvas (crisp scanlines + vignette). */
+  #crt {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0.26) 3px,
+      rgba(0, 0, 0, 0.26) 4px
+    );
+    mix-blend-mode: multiply;
+  }
+  /* vignette + subtle screen-curvature darkening at the corners */
+  #vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(120% 130% at 50% 50%,
+        rgba(0, 0, 0, 0) 58%,
+        rgba(0, 0, 0, 0.35) 82%,
+        rgba(0, 0, 0, 0.72) 100%);
+  }
+  /* faint phosphor wash so the whole tube has a green cast */
+  #tint {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(140% 150% at 50% 42%,
+      rgba(93, 255, 139, 0.05) 0%,
+      rgba(93, 255, 139, 0.015) 45%,
+      rgba(0, 0, 0, 0) 75%);
+    mix-blend-mode: screen;
+  }
+  /* slow rolling horizontal band, animated in CSS so it costs no JS/frame */
+  #roll {
+    position: absolute;
+    left: 0; right: 0;
+    height: 130px;
+    pointer-events: none;
+    background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(180, 255, 200, 0.04) 50%,
+      rgba(255, 255, 255, 0) 100%);
+    mix-blend-mode: screen;
+    animation: rollband 9.5s linear infinite;
+  }
+  @keyframes rollband {
+    0%   { transform: translateY(-150px); }
+    100% { transform: translateY(420px); }
+  }
+  /* global flicker: tiny brightness wobble driven entirely by CSS keyframes */
+  #stage { animation: flick 5.4s steps(1, end) infinite; }
+  @keyframes flick {
+    0%, 100% { filter: brightness(1.00); }
+    7%       { filter: brightness(0.975); }
+    8%       { filter: brightness(1.015); }
+    9%       { filter: brightness(0.99); }
+    38%      { filter: brightness(1.012); }
+    39%      { filter: brightness(0.988); }
+    62%      { filter: brightness(1.00); }
+    77%      { filter: brightness(0.97); }
+    78%      { filter: brightness(1.02); }
+    79%      { filter: brightness(1.00); }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene"></canvas>
+    <div id="tint"></div>
+    <div id="roll"></div>
+    <div id="crt"></div>
+    <div id="vignette"></div>
+  </div>
+
+<script>
+"use strict";
+(function () {
+  // =========================================================================
+  // STAGE FIT — fixed 1280x400 logical stage, scaled to fill, letterboxed.
+  // (Same wrapper as the sibling views so framing is pixel-identical.)
+  // =========================================================================
+  var W = 1280, H = 400;
+  var stage = document.getElementById("stage");
+  function fit() {
+    var s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    stage.style.transform = "scale(" + s + ")";
+  }
+  window.addEventListener("resize", fit);
+  fit();
+
+  // =========================================================================
+  // HIGH-DPI CANVAS — backing store = W*dpr × H*dpr, with a setTransform so all
+  // drawing happens in logical 1280×400 coordinates and text stays crisp.
+  // dpr capped at 2. Re-setup on resize and on fonts.ready.
+  // =========================================================================
+  var cv = document.getElementById("scene");
+  var ctx = cv.getContext("2d", { alpha: false });
+  var dpr = 1;
+
+  function setupCanvas() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width  = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textBaseline = "alphabetic";
+  }
+  setupCanvas();
+  window.addEventListener("resize", setupCanvas);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(setupCanvas);
+  }
+
+  // =========================================================================
+  // PALETTE — phosphor green on near-black; per-sector multicolor accents.
+  // =========================================================================
+  var C = {
+    bg:        "#020803",
+    floor:     "#03100a",   // dark floor
+    aisle:     "#04160d",   // central walking highway band
+    phos:      "#5dff8b",   // primary phosphor green
+    phosBright:"#aaffc4",
+    phosDim:   "#3fae63",
+    phosLo:    "#1f7a3c",
+    phosFaint: "#0e4422",
+    ivory:     "#eafff0",   // bubble status text
+    amber:     "#e8a13c",   // WARN accent
+    amberDim:  "#a8702a",
+    cabBody:   "#06140c",   // server cabinet body
+    cabBody2:  "#08190f",   // slightly lighter top
+    cabShade:  "#020c06"
+  };
+
+  // rack-unit LED greens (+ rare amber handled separately)
+  var LED_COLORS = ["#0e4422", "#176c34", "#2f9a55", "#5dff8b", "#aaffc4"];
+
+  // =========================================================================
+  // PIXEL DRAW HELPERS — crisp filled rects on an integer grid (the "pixel-art"
+  // feel comes from these, NOT from upscaling a low-res buffer).
+  // =========================================================================
+  function rect(x, y, w, h, col) {
+    ctx.fillStyle = col;
+    ctx.fillRect(x, y, w, h);
+  }
+  // integer-snapped rect for chunky pixels
+  function irect(x, y, w, h, col) {
+    ctx.fillStyle = col;
+    ctx.fillRect(x | 0, y | 0, w | 0, h | 0);
+  }
+  // 1px stroke snapped to half-pixels for crispness
+  function hline(x0, x1, y, col, a) {
+    ctx.globalAlpha = (a == null) ? 1 : a;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    var yy = (y | 0) + 0.5;
+    ctx.moveTo(x0, yy); ctx.lineTo(x1, yy);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  function vline(x, y0, y1, col, a) {
+    ctx.globalAlpha = (a == null) ? 1 : a;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    var xx = (x | 0) + 0.5;
+    ctx.moveTo(xx, y0); ctx.lineTo(xx, y1);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  // rounded-rect path (for the speech bubble)
+  function roundRectPath(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
+  // =========================================================================
+  // FONTS — real web fonts via ctx.font. Share Tech Mono for UI/status text;
+  // VT323 for the chunky bracketed sector labels.
+  // =========================================================================
+  var FONT_STM = '"Share Tech Mono", monospace';
+  var FONT_VT  = '"VT323", "Share Tech Mono", monospace';
+  function stm(px) { return px + 'px ' + FONT_STM; }
+  function vt(px)  { return px + 'px ' + FONT_VT; }
+
+  // letter-spaced text drawer (canvas has no native letter-spacing on all
+  // browsers, so we advance glyph-by-glyph). align: 'left'|'center'|'right'.
+  function drawSpaced(str, x, y, spacing, align) {
+    str = String(str);
+    // measure total width with spacing
+    var total = 0, i;
+    for (i = 0; i < str.length; i++) {
+      total += ctx.measureText(str.charAt(i)).width + spacing;
+    }
+    if (total > 0) total -= spacing;
+    var sx = x;
+    if (align === "center") sx = x - total / 2;
+    else if (align === "right") sx = x - total;
+    for (i = 0; i < str.length; i++) {
+      var ch = str.charAt(i);
+      ctx.fillText(ch, sx, y);
+      sx += ctx.measureText(ch).width + spacing;
+    }
+    return total;
+  }
+  function spacedWidth(str, spacing) {
+    var total = 0;
+    for (var i = 0; i < str.length; i++) {
+      total += ctx.measureText(str.charAt(i)).width + spacing;
+    }
+    if (total > 0) total -= spacing;
+    return total;
+  }
+
+  // =========================================================================
+  // MOCK DATA STORE — drifts continuously, loops forever. No memory growth.
+  // (Preserved verbatim from the previous version; containers bumped toward 42.)
+  // =========================================================================
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function walkV(v, lo, hi, step) { return clamp(v + rnd(-step, step), lo, hi); }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  var store = {
+    load:   2.1,          // COMPUTE load avg
+    cores:  16,
+    cpu:    22,           // proxmox cpu %
+    scrub:  61,           // STORAGE zpool scrub %
+    used:   14.6,         // STORAGE TB used (of 21)
+    reqs:   1180,         // NETWORK req/s
+    checks: 142,          // MONITORING checks ok
+    ups:    100,          // POWER ups %
+    watts:  253,          // POWER load W
+    fans:   44,           // COOLING fan %
+    intake: 21,           // COOLING intake C
+    containers: 42,       // docker container count (reference shows 42)
+    bootMs: Date.now() - (19 * 86400 + 7 * 3600 + 42 * 60) * 1000
+  };
+
+  function fmtUptime() {
+    var s = Math.floor((Date.now() - store.bootMs) / 1000);
+    var d = Math.floor(s / 86400); s -= d * 86400;
+    var h = Math.floor(s / 3600); s -= h * 3600;
+    var m = Math.floor(s / 60); s -= m * 60;
+    return d + "d " + pad2(h) + ":" + pad2(m);
+  }
+
+  // Drift the numbers on a ~1.4s cadence (called by the fixed-step sim).
+  function driftData() {
+    store.load  = +clamp(store.load + rnd(-0.25, 0.25), 0.4, 9.5).toFixed(1);
+    store.cpu   = Math.round(walkV(store.cpu, 6, 78, 9));
+    store.scrub = clamp(store.scrub + rnd(0.4, 1.6), 0, 100);
+    if (store.scrub >= 100) store.scrub = rnd(2, 8); // finished -> new scrub
+    store.used  = +clamp(store.used + rnd(-0.05, 0.07), 12.0, 20.4).toFixed(1);
+    store.reqs  = Math.round(walkV(store.reqs, 420, 2400, 180));
+    store.checks = clamp(store.checks + (Math.random() < 0.5 ? -1 : 1), 138, 146) | 0;
+    store.ups   = clamp(store.ups + (Math.random() < 0.15 ? -1 : (store.ups < 100 ? 1 : 0)), 92, 100) | 0;
+    store.watts = Math.round(walkV(store.watts, 180, 320, 12));
+    store.fans  = Math.round(walkV(store.fans, 28, 72, 4));
+    store.intake = +clamp(store.intake + rnd(-0.3, 0.3), 18, 27).toFixed(0);
+    if (Math.random() < 0.07) store.containers = clamp(store.containers + (Math.random() < 0.5 ? -1 : 1), 40, 44) | 0;
+  }
+
+  // =========================================================================
+  // SECTORS — 7 labelled equipment zones in two rows around the central aisle.
+  // STATUS-LINE FACTORIES — lowercase, matching the reference phrasing.
+  // ~14% chance of an amber WARN line.
+  // =========================================================================
+  var L = {
+    COMPUTE: {
+      ok: [
+        function(){ return "load " + store.load.toFixed(1) + " / " + store.cores + "t"; },
+        function(){ return "cpu " + store.cpu + "% nominal"; },
+        function(){ return "kvm win-vm up"; },
+        function(){ return "8 vms online"; }
+      ],
+      warn: [
+        function(){ return "warn cpu spike"; },
+        function(){ return "warn load " + (store.load + 4).toFixed(1); }
+      ]
+    },
+    STORAGE: {
+      ok: [
+        function(){ return "zpool scrub " + Math.round(store.scrub) + "%"; },
+        function(){ return store.used.toFixed(1) + "t / 21t"; },
+        function(){ return "smart check ok"; },
+        function(){ return "resilver idle"; }
+      ],
+      warn: [
+        function(){ return "warn disk 88%"; },
+        function(){ return "warn smart sdb"; }
+      ]
+    },
+    NETWORK: {
+      ok: [
+        function(){ return "routing " + (store.reqs/1000).toFixed(1) + "k req/s"; },
+        function(){ return "eth0 link 1g"; },
+        function(){ return "wireguard up"; },
+        function(){ return "pi-hole ok"; }
+      ],
+      warn: [
+        function(){ return "warn pkt loss"; },
+        function(){ return "warn lat 180ms"; }
+      ]
+    },
+    MONITORING: {
+      ok: [
+        function(){ return "all probes green"; },
+        function(){ return store.checks + " checks ok"; },
+        function(){ return "no alerts 6h"; },
+        function(){ return "grafana live"; }
+      ],
+      warn: [
+        function(){ return "warn 1 alert"; },
+        function(){ return "warn probe lag"; }
+      ]
+    },
+    "POWER·UPS": {
+      ok: [
+        function(){ return "ups at " + store.ups + "%"; },
+        function(){ return "draw " + store.watts + "w"; },
+        function(){ return "mains ok 230v"; },
+        function(){ return "runtime 38min"; }
+      ],
+      warn: [
+        function(){ return "warn on battery"; },
+        function(){ return "warn ups 71%"; }
+      ]
+    },
+    COOLING: {
+      ok: [
+        function(){ return "fans at " + store.fans + "%"; },
+        function(){ return "intake " + store.intake + "c"; },
+        function(){ return "delta-t 6c"; },
+        function(){ return "airflow ok"; }
+      ],
+      warn: [
+        function(){ return "warn intake 29c"; },
+        function(){ return "warn fan 2 low"; }
+      ]
+    },
+    "BACKUP VAULT": {
+      ok: [
+        function(){ return "backup ✓ 02:00"; },
+        function(){ return "restic snap ok"; },
+        function(){ return "snapshot 14/14"; },
+        function(){ return "offsite synced"; }
+      ],
+      warn: [
+        function(){ return "warn backup late"; },
+        function(){ return "warn retry 1/3"; }
+      ]
+    }
+  };
+
+  // Sector accent palette per the spec.
+  var SECTORS = [
+    { name: "COMPUTE",      accent: "#e8a13c", row: "top" },   // amber
+    { name: "STORAGE",      accent: "#46d6ff", row: "top" },   // cyan
+    { name: "NETWORK",      accent: "#5dff8b", row: "top" },   // green
+    { name: "MONITORING",   accent: "#8aa0ff", row: "top" },   // blue
+    { name: "POWER·UPS",    accent: "#e8d44c", row: "bot" },   // yellow
+    { name: "COOLING",      accent: "#79d4ff", row: "bot" },   // ice-blue
+    { name: "BACKUP VAULT", accent: "#ff5db1", row: "bot" }    // magenta
+  ];
+
+  // ---- LAYOUT (logical 1280×400) ------------------------------------------
+  var HEAD_H   = 48;     // header band 0..48
+  var AISLE_Y  = 226;    // walking-highway centerline
+  var AISLE_H  = 30;     // highway band thickness
+
+  // Top row: 4 pads, centers at x ≈ 190,490,790,1090, pad top y=96.
+  var TOP_CX   = [190, 490, 790, 1090];
+  var TOP_PADW = 210, TOP_PADH = 84, TOP_PADY = 96;
+  var TOP_ACCESS = 196;  // agent stands just below the pad, toward the aisle
+
+  // Bottom row: 3 pads staggered into the gaps; centers x ≈ 360,690,1010, top y=280.
+  var BOT_CX   = [360, 690, 1010];
+  var BOT_PADW = 210, BOT_PADH = 80, BOT_PADY = 280;
+  var BOT_ACCESS = 258;  // agent stands just above the pad, toward the aisle
+
+  (function layoutSectors() {
+    var ti = 0, bi = 0;
+    for (var i = 0; i < SECTORS.length; i++) {
+      var S = SECTORS[i];
+      if (S.row === "top") {
+        S.cx = TOP_CX[ti++];
+        S.w = TOP_PADW; S.h = TOP_PADH;
+        S.x = Math.round(S.cx - S.w / 2);
+        S.y = TOP_PADY;
+        S.accessY = TOP_ACCESS;
+      } else {
+        S.cx = BOT_CX[bi++];
+        S.w = BOT_PADW; S.h = BOT_PADH;
+        S.x = Math.round(S.cx - S.w / 2);
+        S.y = BOT_PADY;
+        S.accessY = BOT_ACCESS;
+      }
+      buildCabinets(S);
+    }
+  })();
+
+  // Three detailed pixel cabinets inside a sector pad, each with blinking LEDs.
+  // LED blink data is built ONCE (no per-frame allocation; we just draw richer).
+  function buildCabinets(S) {
+    S.cabs = [];
+    var n = 3;
+    var padInX = 12;                 // horizontal inset from pad edge
+    var gap = 10;                    // gap between cabinets
+    var availW = S.w - padInX * 2;
+    var cw = Math.floor((availW - gap * (n - 1)) / n);  // ~56
+    // Cabinet vertical extent inside the pad (leave a margin top & bottom).
+    var inTop = S.y + 8;
+    var inH   = S.h - 16;
+    for (var i = 0; i < n; i++) {
+      var cx = S.x + padInX + i * (cw + gap);
+      var cab = { x: cx, y: inTop, w: cw, h: inH, leds: [], slots: [] };
+      // 6–8 horizontal U-slot lines down the face
+      var slotCount = 7;
+      var headBar = 7;                       // header strip height
+      var faceTop = inTop + headBar + 2;
+      var faceBot = inTop + inH - 3;
+      var faceH = faceBot - faceTop;
+      var slotStep = faceH / slotCount;
+      for (var u = 0; u < slotCount; u++) {
+        var sy = Math.round(faceTop + u * slotStep + slotStep * 0.5);
+        cab.slots.push(sy);
+        // 1–2 tiny LEDs near the left rail per slot
+        var ledN = (Math.random() < 0.45) ? 2 : 1;
+        for (var d = 0; d < ledN; d++) {
+          cab.leds.push({
+            x: cx + 5 + d * 5,
+            y: sy - 2,
+            base: (Math.random() * 5) | 0,
+            phase: Math.random() * 6.28,
+            rate: rnd(0.6, 2.6),
+            amber: Math.random() < 0.05
+          });
+        }
+      }
+      S.cabs.push(cab);
+    }
+  }
+
+  // sector "aisle column" the agent walks to before turning into the access point
+  function sectorAisleX(S) { return S.cx; }
+
+  // pretty sector name for the bubble header ("POWER·UPS" -> "POWER · UPS")
+  function prettyName(name) {
+    return name.replace("·", " · ");
+  }
+
+  // =========================================================================
+  // AGENTS — hooded pixel sprites that patrol. STATE MACHINE PRESERVED:
+  //   PICK -> ROUTE(leg0 toAisleY -> leg1 alongAisle -> leg2 intoSector)
+  //        -> ARRIVE -> SPEAK(typewriter ~4s hold) -> release claim -> PICK
+  // FAN-OUT: exclude the just-left sector and any sector currently claimed.
+  // =========================================================================
+
+  // Sprite pixel matrix. ~22w × ~30h logical via PX-sized chunky pixels.
+  // Sprite grid is 11 cols × 15 rows; each grid cell = PX×PX logical pixels.
+  // Codes: 0 empty · 1 robe-mid · 2 robe-low(shade) · 3 hood-top · 4 visor
+  var PX = 2;                          // logical px per sprite-pixel
+  var SP_COLS = 11, SP_ROWS = 15;
+  var AGENT_W = SP_COLS * PX;          // 22
+  var AGENT_H = SP_ROWS * PX;          // 30
+
+  var SPRITE = [
+    "...33333...",   // 0  hood crown
+    "..3333333..",   // 1
+    ".333333333.",   // 2
+    ".334444433.",   // 3  hood opening + visor band
+    ".344444443.",   // 4  visor
+    ".344444443.",   // 5  visor
+    ".334444433.",   // 6
+    ".333333333.",   // 7  hood meets shoulders
+    "..1111111..",   // 8  shoulders
+    ".111111111.",   // 9  robe
+    ".111111111.",   // 10 robe
+    ".112111211.",   // 11 robe fold hint
+    ".111111111.",   // 12 robe
+    ".221111122.",   // 13 robe lower (shade sides)
+    "..2.....2..".substr(0,11) // 14 legs (overwritten by walk frames)
+  ];
+  // Walk / idle leg rows (row 14 of the sprite grid)
+  var LEG_IDLE  = "..2.....2..";
+  var LEG_WALK_A= ".2.......2.";
+  var LEG_WALK_B= "...2...2...";
+
+  // Render a hooded agent sprite. anchor (fx,fy) = FEET center (bottom-center).
+  // pal = {hoodT, robe, shade, visor, eye}. legRow string for current frame.
+  // flip mirrors horizontally. bob = small vertical bob while walking.
+  function drawAgent(fx, fy, pal, legRow, flip, bob) {
+    var left = Math.round(fx - AGENT_W / 2);
+    var top  = Math.round(fy - AGENT_H) + bob;
+    var r, c, code, col, gc;
+    for (r = 0; r < SP_ROWS; r++) {
+      var row = (r === 14) ? legRow : SPRITE[r];
+      for (c = 0; c < SP_COLS; c++) {
+        code = row.charCodeAt(c) - 48;
+        if (code <= 0) continue;
+        if (code === 1) col = pal.robe;
+        else if (code === 2) col = pal.shade;
+        else if (code === 3) col = pal.hoodT;
+        else col = pal.visor;
+        gc = flip ? (SP_COLS - 1 - c) : c;
+        ctx.fillStyle = col;
+        ctx.fillRect(left + gc * PX, top + r * PX, PX, PX);
+      }
+    }
+    // darker "eye" pixels inside the visor (rows 4–5, a couple of cols)
+    ctx.fillStyle = pal.eye;
+    var e1 = flip ? (SP_COLS - 1 - 3) : 3;
+    var e2 = flip ? (SP_COLS - 1 - 7) : 7;
+    ctx.fillRect(left + e1 * PX, top + 4 * PX, PX, PX);
+    ctx.fillRect(left + e2 * PX, top + 4 * PX, PX, PX);
+
+    // additive GLOW HALO around the visor — the signature lit-monitor face.
+    ctx.globalCompositeOperation = "lighter";
+    var vx = left + 4 * PX, vy = top + 3 * PX, vw = 3 * PX, vh = 3 * PX;
+    ctx.fillStyle = pal.visor;
+    ctx.globalAlpha = 0.20;
+    ctx.fillRect(vx - 3, vy - 3, vw + 6, vh + 6);
+    ctx.globalAlpha = 0.16;
+    ctx.fillRect(vx - 6, vy - 5, vw + 12, vh + 10);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // Soft drop shadow ellipse beneath the feet (depth cue).
+  function drawShadow(fx, fy) {
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = "#010503";
+    ctx.beginPath();
+    ctx.ellipse(fx, fy + 1, AGENT_W * 0.5, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function makeAgent(name, accent, startX) {
+    return {
+      name: name,
+      accent: accent,
+      // robe greens shared across all agents (same family); visor = accent.
+      pal: { hoodT: "#2a8f4e", robe: "#1c7d40", shade: "#0f4f28",
+             visor: accent, eye: "#06210f" },
+      x: startX, y: AISLE_Y,        // foot/anchor position
+      dir: 1,                       // facing: 1 right, -1 left
+      faceFlip: false,
+      target: null,                 // current sector object
+      lastSector: null,             // to avoid immediate repeat
+      phase: "pick",                // pick|route|arrive|speak
+      leg: 0,                       // route leg index
+      frame: 0, stepAcc: 0,         // walk animation
+      moving: false,
+      bob: 0,
+      // typewriter
+      line: "", shown: 0, typeAcc: 0, warn: false,
+      holdAcc: 0, holdFor: 4.0,
+      think: rnd(0.1, 1.6)
+    };
+  }
+
+  // Keep the existing name→accent assignment (distinct visor colors).
+  var agents = [
+    makeAgent("ATLAS",  "#46e8ff", 190),  // cyan
+    makeAgent("ARGUS",  "#7fb8ff", 420),  // blue
+    makeAgent("VESTA",  "#ff5ce0", 640),  // magenta
+    makeAgent("HERMES", "#ffb347", 860),  // amber
+    makeAgent("NOVA",   "#a0ff5d", 1060)  // lime
+  ];
+  // stagger initial thinking so they don't all pick on the same tick
+  agents[0].think = 0.2; agents[1].think = 0.9; agents[2].think = 1.5;
+  agents[3].think = 2.1; agents[4].think = 2.7;
+
+  // A sector is "claimed" while it is some agent's target.
+  function isClaimed(S) {
+    for (var i = 0; i < agents.length; i++) if (agents[i].target === S) return true;
+    return false;
+  }
+
+  function pickSector(a) {
+    var cands = [];
+    for (var i = 0; i < SECTORS.length; i++) {
+      var S = SECTORS[i];
+      if (S === a.lastSector) continue;
+      if (isClaimed(S)) continue;
+      cands.push(S);
+    }
+    if (cands.length === 0) {
+      for (var j = 0; j < SECTORS.length; j++) if (!isClaimed(SECTORS[j])) cands.push(SECTORS[j]);
+    }
+    if (cands.length === 0) return null;
+    return cands[(Math.random() * cands.length) | 0];
+  }
+
+  function buildLine(a) {
+    var pool = L[a.target.name];
+    if (Math.random() < 0.14 && pool.warn.length) {
+      a.warn = true;
+      return pool.warn[(Math.random() * pool.warn.length) | 0]();
+    }
+    a.warn = false;
+    return pool.ok[(Math.random() * pool.ok.length) | 0]();
+  }
+
+  // movement speed (logical px / sec) — scaled up ~3x for the bigger space.
+  var SPEED = 108;
+  var TYPE_S = 0.05;     // seconds per typed character
+
+  // Move the agent's anchor toward (tx,ty) at SPEED*dt; returns true on arrival.
+  function moveToward(a, tx, ty, dt) {
+    var dx = tx - a.x, dy = ty - a.y;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    var stepLen = SPEED * dt;
+    if (d <= stepLen || d < 1.0) { a.x = tx; a.y = ty; return true; }
+    a.x += (dx / d) * stepLen;
+    a.y += (dy / d) * stepLen;
+    if (Math.abs(dx) > 0.4) { a.dir = dx > 0 ? 1 : -1; a.faceFlip = dx < 0; }
+    return false;
+  }
+
+  // Advance one agent's state machine + walk animation by fixed dt.
+  function tickAgent(a, dt) {
+    if (a.moving) {
+      a.stepAcc += dt;
+      if (a.stepAcc >= 0.14) { a.stepAcc = 0; a.frame ^= 1; }
+      a.bob = (a.frame === 0) ? 0 : -1;     // tiny vertical bob
+    } else {
+      a.bob = 0;
+    }
+
+    if (a.phase === "pick") {
+      a.think -= dt;
+      a.moving = false;
+      if (a.think <= 0) {
+        var S = pickSector(a);
+        if (S) {
+          a.target = S;            // claim immediately (fan-out)
+          a.phase = "route";
+          a.leg = 0;
+          a.moving = true;
+        } else {
+          a.think = rnd(0.4, 1.0);
+        }
+      }
+      return;
+    }
+
+    if (a.phase === "route") {
+      a.moving = true;
+      var Sr = a.target;
+      // LEG 0: get onto the aisle centerline (vertical move to AISLE_Y)
+      if (a.leg === 0) {
+        if (moveToward(a, a.x, AISLE_Y, dt)) a.leg = 1;
+        return;
+      }
+      // LEG 1: travel along the aisle to the sector's column (horizontal)
+      if (a.leg === 1) {
+        if (moveToward(a, sectorAisleX(Sr), AISLE_Y, dt)) a.leg = 2;
+        return;
+      }
+      // LEG 2: leave the aisle toward the sector's access point (vertical)
+      if (a.leg === 2) {
+        if (moveToward(a, Sr.cx, Sr.accessY, dt)) {
+          a.phase = "arrive";
+        }
+        return;
+      }
+    }
+
+    if (a.phase === "arrive") {
+      a.moving = false;
+      a.line = buildLine(a);
+      a.shown = 0; a.typeAcc = 0;
+      a.holdAcc = 0; a.holdFor = rnd(3.4, 4.6);
+      a.phase = "speak";
+      // face toward the pad for a settled look (target's column vs. our x)
+      if (a.target) a.faceFlip = (a.target.cx < a.x);
+      return;
+    }
+
+    if (a.phase === "speak") {
+      a.moving = false;
+      if (a.shown < a.line.length) {
+        a.typeAcc += dt;
+        var want = Math.floor(a.typeAcc / TYPE_S);
+        a.shown = Math.min(a.line.length, want);
+      } else {
+        a.holdAcc += dt;
+        if (a.holdAcc >= a.holdFor) {
+          a.lastSector = a.target;
+          a.target = null;
+          a.line = ""; a.shown = 0;
+          a.phase = "pick";
+          a.think = rnd(0.2, 1.1);
+        }
+      }
+      return;
+    }
+  }
+
+  // =========================================================================
+  // META LINE — header status, cycled every few seconds (lowercase).
+  // =========================================================================
+  var metaIdx = 0;
+  function metaLine() {
+    switch (metaIdx % 5) {
+      case 0: return "7 sectors · " + store.containers + " containers";
+      case 1: return "5 agents on floor";
+      case 2: return "uptime " + fmtUptime();
+      case 3: return "backup ✓ 02:00";
+      default: return "power " + store.watts + "w · fans " + store.fans + "%";
+    }
+  }
+
+  // =========================================================================
+  // RENDER LAYER
+  // =========================================================================
+  var dashPhase = 0;
+
+  // ---- FLOOR + AISLE -------------------------------------------------------
+  function drawFloorAndAisle() {
+    // floor fill
+    rect(0, HEAD_H, W, H - HEAD_H, C.floor);
+
+    // faint grid lines across the whole floor (very low alpha)
+    var t = 40;
+    ctx.strokeStyle = C.phos;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.045;
+    ctx.beginPath();
+    for (var gx = 0; gx <= W; gx += t) {
+      var xx = gx + 0.5;
+      ctx.moveTo(xx, HEAD_H); ctx.lineTo(xx, H);
+    }
+    for (var gy = HEAD_H; gy <= H; gy += t) {
+      var yy = gy + 0.5;
+      ctx.moveTo(0, yy); ctx.lineTo(W, yy);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // central walking-highway band (slightly different shade)
+    var ay0 = AISLE_Y - (AISLE_H >> 1);
+    rect(0, ay0, W, AISLE_H, C.aisle);
+    hline(0, W, ay0, C.phosFaint, 0.6);
+    hline(0, W, ay0 + AISLE_H, C.phosFaint, 0.6);
+
+    // animated dashed centerline (dashes march slowly)
+    ctx.strokeStyle = C.phosLo;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.85;
+    ctx.setLineDash([18, 18]);
+    ctx.lineDashOffset = -dashPhase;
+    ctx.beginPath();
+    ctx.moveTo(0, AISLE_Y + 0.5);
+    ctx.lineTo(W, AISLE_Y + 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- SECTOR PAD frame: thin border + prominent L-corner brackets ---------
+  function drawSectorFrame(S, active) {
+    var x = S.x, y = S.y, w = S.w, h = S.h, col = S.accent;
+
+    // thin accent border at low alpha
+    ctx.globalAlpha = active ? 0.85 : 0.5;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.globalAlpha = 1;
+
+    // prominent L-shaped corner brackets (full accent, ~2px thick, ~16px legs)
+    var lg = 16, th = 2;
+    ctx.fillStyle = col;
+    // TL
+    ctx.fillRect(x, y, lg, th);            ctx.fillRect(x, y, th, lg);
+    // TR
+    ctx.fillRect(x + w - lg, y, lg, th);   ctx.fillRect(x + w - th, y, th, lg);
+    // BL
+    ctx.fillRect(x, y + h - th, lg, th);   ctx.fillRect(x, y + h - lg, th, lg);
+    // BR
+    ctx.fillRect(x + w - lg, y + h - th, lg, th); ctx.fillRect(x + w - th, y + h - lg, th, lg);
+  }
+
+  // ---- CABINETS: detailed dark racks with header strip, rails, U-slots, LEDs -
+  function drawCabinets(S, now) {
+    for (var i = 0; i < S.cabs.length; i++) {
+      var cab = S.cabs[i];
+      var cx = cab.x, cy = cab.y, cw = cab.w, ch = cab.h;
+
+      // body + subtle top shading
+      irect(cx, cy, cw, ch, C.cabBody);
+      irect(cx, cy, cw, Math.round(ch * 0.4), C.cabBody2);
+
+      // accent-tinted 1px outline
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = S.accent;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
+      ctx.globalAlpha = 1;
+
+      // header bar strip across the top (~7px, accent low alpha)
+      ctx.globalAlpha = 0.35;
+      irect(cx + 1, cy + 1, cw - 2, 6, S.accent);
+      ctx.globalAlpha = 1;
+      // a couple of header notch pixels (bright)
+      ctx.globalAlpha = 0.7;
+      irect(cx + cw - 6, cy + 2, 2, 4, S.accent);
+      irect(cx + cw - 10, cy + 2, 2, 4, S.accent);
+      ctx.globalAlpha = 1;
+
+      // thin side rails
+      irect(cx + 2, cy + 9, 1, ch - 11, C.cabShade);
+      irect(cx + cw - 3, cy + 9, 1, ch - 11, C.cabShade);
+
+      // U-slot horizontal lines + activity tick
+      ctx.globalAlpha = 0.55;
+      for (var s = 0; s < cab.slots.length; s++) {
+        var sy = cab.slots[s];
+        hline(cx + 3, cx + cw - 3, sy, C.phosFaint, 0.5);
+      }
+      ctx.globalAlpha = 1;
+
+      // blinking activity LEDs (2px squares), brightness pulsing
+      for (var k = 0; k < cab.leds.length; k++) {
+        var Ld = cab.leds[k];
+        var tw = 0.5 + 0.5 * Math.sin(now * Ld.rate + Ld.phase);
+        var col;
+        if (Ld.amber) {
+          col = tw > 0.55 ? C.amber : C.amberDim;
+        } else {
+          var lvl = Math.min(4, Math.max(0, Ld.base + Math.round(tw * 2) - 1));
+          col = LED_COLORS[lvl];
+        }
+        irect(Ld.x, Ld.y, 2, 2, col);
+        // faint activity tick to the right of the bright LEDs
+        if (tw > 0.7 && !Ld.amber) {
+          ctx.globalAlpha = 0.5;
+          irect(cx + cw - 7, Ld.y, 3, 1, C.phosLo);
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+  }
+
+  // ---- BRACKETED SECTOR LABEL (VT323) above/below the pad ------------------
+  function drawSectorLabel(S) {
+    var label = "[ " + S.name + " ]";
+    ctx.font = vt(26);
+    ctx.fillStyle = S.accent;
+    var y = (S.row === "top") ? S.y - 14 : S.y + S.h + 26;
+    drawSpaced(label, S.cx, y, 2, "center");
+  }
+
+  // ---- ACCESS POINT tick on the aisle side of each pad ---------------------
+  function drawAccessTick(S) {
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = S.accent;
+    var ax = S.cx;
+    if (S.row === "top") {
+      // small downward chevron toward the aisle
+      irect(ax - 1, S.y + S.h + 2, 2, 2, S.accent);
+      irect(ax - 4, S.y + S.h + 6, 9, 1, S.accent);
+    } else {
+      irect(ax - 1, S.y - 4, 2, 2, S.accent);
+      irect(ax - 4, S.y - 7, 9, 1, S.accent);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- SPEECH BUBBLE (two-line, typewriter, tail toward agent) -------------
+  function drawBubble(ag) {
+    var S = ag.target;
+    if (!S) return;
+    var below = (S.row === "top");   // bubble sits in the aisle, BELOW top-row agents
+    var accent = ag.warn ? C.amber : C.phos;
+    var nameLine = ag.name + " @ " + prettyName(S.name);
+    var statusLine = ag.line.substring(0, ag.shown);
+
+    // measure to size the box
+    ctx.font = stm(11);
+    var nameSp = 1.5;
+    var nameW = spacedWidth(nameLine.toUpperCase(), nameSp);
+    ctx.font = stm(17);
+    var statusW = ctx.measureText(ag.line).width;  // size to full line so box is stable
+
+    var padX = 10, padY = 8;
+    var lineGap = 6;
+    var nameH = 11, statH = 17;
+    var inW = Math.ceil(Math.max(nameW, statusW)) + padX * 2;
+    inW = Math.max(inW, 120);
+    var inH = padY + nameH + lineGap + statH + padY;
+
+    // horizontal placement: centered over the agent, clamped to 0..W
+    var bx = Math.round(ag.x - inW / 2);
+    if (bx < 8) bx = 8;
+    if (bx + inW > W - 8) bx = W - 8 - inW;
+
+    // vertical placement: in the open aisle
+    var tailH = 9, tailW = 14;
+    var by;
+    if (below) {
+      // top-row agent stands at y≈196 (above aisle); bubble below in aisle,
+      // tail on TOP pointing up at the agent.
+      by = ag.y + 16;
+    } else {
+      // bottom-row agent stands at y≈258 (below aisle); bubble above in aisle,
+      // tail on BOTTOM pointing down at the agent.
+      by = ag.y - AGENT_H - 16 - inH;
+    }
+
+    // shadow/glow behind the bubble
+    ctx.save();
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = 8;
+    // body
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = "#04140b";
+    roundRectPath(bx, by, inW, inH, 4);
+    ctx.fill();
+    ctx.restore();
+
+    // border
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    roundRectPath(bx + 0.5, by + 0.5, inW - 1, inH - 1, 4);
+    ctx.stroke();
+
+    // tail (filled triangle + matching border edge)
+    var tx = clamp(Math.round(ag.x), bx + 12, bx + inW - 12);
+    ctx.fillStyle = "#04140b";
+    ctx.beginPath();
+    if (below) {
+      ctx.moveTo(tx - tailW / 2, by + 1);
+      ctx.lineTo(tx + tailW / 2, by + 1);
+      ctx.lineTo(tx, by - tailH);
+    } else {
+      ctx.moveTo(tx - tailW / 2, by + inH - 1);
+      ctx.lineTo(tx + tailW / 2, by + inH - 1);
+      ctx.lineTo(tx, by + inH + tailH);
+    }
+    ctx.closePath();
+    ctx.fill();
+    // tail border edges
+    ctx.strokeStyle = accent;
+    ctx.beginPath();
+    if (below) {
+      ctx.moveTo(tx - tailW / 2, by + 0.5);
+      ctx.lineTo(tx, by - tailH);
+      ctx.lineTo(tx + tailW / 2, by + 0.5);
+    } else {
+      ctx.moveTo(tx - tailW / 2, by + inH - 0.5);
+      ctx.lineTo(tx, by + inH + tailH);
+      ctx.lineTo(tx + tailW / 2, by + inH - 0.5);
+    }
+    ctx.stroke();
+
+    // LINE 1 — "<NAME> @ <SECTOR>" (small, accent green, letter-spaced, upper)
+    ctx.font = stm(11);
+    ctx.fillStyle = accent;
+    drawSpaced(nameLine.toUpperCase(), bx + padX, by + padY + nameH - 2, nameSp, "left");
+
+    // LINE 2 — status line (larger, ivory, typewriter-revealed)
+    ctx.font = stm(17);
+    ctx.fillStyle = ag.warn ? C.amber : C.ivory;
+    var statY = by + padY + nameH + lineGap + statH - 3;
+    ctx.fillText(statusLine, bx + padX, statY);
+    // blinking cursor while typing/holding
+    if (bubbleBlink) {
+      var cw2 = ctx.measureText(statusLine).width;
+      ctx.fillStyle = accent;
+      ctx.fillRect(bx + padX + cw2 + 2, statY - statH + 4, 8, statH - 2);
+    }
+  }
+
+  // ---- HEADER band ---------------------------------------------------------
+  function drawHeader(cursorOn) {
+    rect(0, 0, W, HEAD_H, C.bg);
+
+    // left title (lowercase) + blinking block cursor
+    ctx.font = stm(26);
+    ctx.fillStyle = C.phos;
+    var title = "node-01 // datacenter floor";
+    var ty = 33;
+    ctx.fillText(title, 18, ty);
+    if (cursorOn) {
+      var tw = ctx.measureText(title).width;
+      ctx.fillStyle = C.phos;
+      ctx.fillRect(18 + tw + 6, ty - 18, 12, 22);
+    }
+
+    // right cycling meta line (dimmer green, smaller)
+    ctx.font = stm(15);
+    ctx.fillStyle = C.phosDim;
+    var meta = metaLine();
+    var mw = ctx.measureText(meta).width;
+    ctx.fillText(meta, W - 18 - mw, ty - 2);
+
+    // thin divider rule under the header
+    hline(0, W, HEAD_H - 1, C.phosFaint, 0.8);
+    // a few dim tick pips along the divider
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = C.phosLo;
+    for (var x = 8; x < W; x += 48) ctx.fillRect(x, HEAD_H - 2, 1, 2);
+    ctx.globalAlpha = 1;
+  }
+
+  // light per-frame phosphor speckle (subtle + capped; no growth)
+  var speckle = [];
+  for (var sp = 0; sp < 28; sp++) speckle.push({ x: 0, y: 0 });
+  function drawSpeckle() {
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = C.phos;
+    for (var i = 0; i < speckle.length; i++) {
+      var s = speckle[i];
+      if (Math.random() < 0.5) {
+        s.x = (Math.random() * W) | 0;
+        s.y = (HEAD_H + Math.random() * (H - HEAD_H)) | 0;
+      }
+      ctx.globalAlpha = Math.random() * 0.05;
+      ctx.fillRect(s.x, s.y, 1, 1);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // =========================================================================
+  // RENDER PASS
+  // =========================================================================
+  var headCursor = true, bubbleBlink = true;
+  function render(now) {
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    drawFloorAndAisle();
+
+    // sectors: frame + cabinets + label + access tick
+    for (var i = 0; i < SECTORS.length; i++) {
+      var S = SECTORS[i];
+      drawSectorFrame(S, !!S._active);
+      drawCabinets(S, now);
+      drawSectorLabel(S);
+      drawAccessTick(S);
+    }
+
+    // ---- AGENTS: depth-sort by foot Y ascending (draw far/higher first) ----
+    var order = agents.slice().sort(function (p, q) { return p.y - q.y; });
+
+    for (var a = 0; a < order.length; a++) {
+      var ag = order[a];
+      drawShadow(Math.round(ag.x), Math.round(ag.y));
+      var legRow;
+      if (!ag.moving) legRow = LEG_IDLE;
+      else legRow = (ag.frame === 0) ? LEG_WALK_A : LEG_WALK_B;
+      drawAgent(ag.x, ag.y, ag.pal, legRow, ag.faceFlip, ag.bob);
+      // (no floating name tag — identity reads from the visor colour + the
+      //  bubble's "NAME @ SECTOR" header on arrival, matching the reference)
+    }
+
+    // speech bubbles drawn AFTER all sprites so they sit on top cleanly
+    for (var b = 0; b < order.length; b++) {
+      var ab = order[b];
+      if (ab.phase === "speak" && ab.shown > 0) drawBubble(ab);
+    }
+
+    drawSpeckle();
+    drawHeader(headCursor);
+  }
+
+  // =========================================================================
+  // FIXED-TIMESTEP SIM @ ~30fps (PRESERVED). State machines, positions, walk
+  // frames, data drift, typewriter, dashed line, blink advance in fixed dt
+  // steps; rAF drives rendering and just reads the state. The shared pump()/
+  // STEP_MS accumulator means the sim runs at real-time with no double-stepping.
+  // =========================================================================
+  var STEP = 1 / 30;
+  var STEP_MS = 1000 / 30;
+  var acc = 0;
+  var prev = performance.now();
+  var simClock = 0;
+  var tData = 0, tMeta = 0, tBlink = 0;
+
+  function simStep() {
+    simClock += STEP;
+
+    // data drift @ ~1.4s
+    tData += STEP;
+    if (tData >= 1.4) { tData -= 1.4; driftData(); }
+
+    // meta cycle @ ~3.4s
+    tMeta += STEP;
+    if (tMeta >= 3.4) { tMeta -= 3.4; metaIdx++; }
+
+    // blink @ ~0.5s (header cursor + bubble cursor)
+    tBlink += STEP;
+    if (tBlink >= 0.5) { tBlink -= 0.5; headCursor = !headCursor; bubbleBlink = !bubbleBlink; }
+
+    // marching dashes on the highway (slow phase advance)
+    dashPhase += STEP * 16;
+
+    // advance every agent's state machine
+    for (var i = 0; i < agents.length; i++) tickAgent(agents[i], STEP);
+
+    // mark which sectors are "active" (an agent parked & speaking there)
+    for (var s = 0; s < SECTORS.length; s++) SECTORS[s]._active = false;
+    for (var k = 0; k < agents.length; k++) {
+      if (agents[k].phase === "speak" && agents[k].target) agents[k].target._active = true;
+    }
+  }
+
+  // pump(): advance the accumulator against ONE shared `prev` clock; run as many
+  // fixed sim steps as elapsed wall-time has earned. Both the rAF loop and the
+  // setInterval below call this; sharing `prev`+`acc` means whichever fires
+  // first consumes the time and the other finds ~0 left — real-time, no
+  // double-stepping.
+  function pump() {
+    var now = performance.now();
+    var elapsed = now - prev;
+    prev = now;
+    if (elapsed < 0) elapsed = 0;
+    if (elapsed > 250) elapsed = 250;
+    acc += elapsed;
+    var guard = 0;
+    while (acc >= STEP_MS && guard < 8) {
+      simStep();
+      acc -= STEP_MS;
+      guard++;
+    }
+    if (guard >= 8) acc = 0;
+  }
+
+  function loop() {
+    requestAnimationFrame(loop);
+    pump();
+    render(simClock);
+  }
+
+  // keep the sim advancing when the tab is backgrounded and rAF is throttled.
+  setInterval(pump, STEP_MS);
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
