@@ -105,6 +105,28 @@ Static site — no build, no install:
 The themed views also open standalone — e.g. double-click `views/datacenter.html`, or visit
 `http://localhost:8080/views/`.
 
+## Terminal views — `terminal/`
+
+Every display also exists as a **terminal (ANSI) version** — same looks, same mocked drifting
+data, rendered with truecolor escapes, block characters, and half-block pixel art instead of a
+browser. Zero dependencies; all you need is Node ≥ 18 and a truecolor-capable terminal
+(iTerm2, Terminal.app, kitty, alacritty, Windows Terminal…).
+
+```sh
+node terminal/index.js          # the picker — choose a view, q returns to the menu
+node terminal/dashboard.js      # Mission Control (keys: 1/2 scenes, 0 test alert)
+node terminal/agents.js         # Agents on Duty
+node terminal/datacenter.js     # Datacenter Floor
+node terminal/terminal.js       # CRT Terminal
+node terminal/pixel-amber.js    # Pixel / Amber
+node terminal/tui.js            # Hacker TUI
+```
+
+They adapt to your terminal size (best at ~160×40 — the strip's 3.2:1 ratio; minimum 80×24),
+redraw flicker-free, run forever with bounded memory, and quit with **`q`** or **Ctrl-C**. Each
+also supports `--once` to print a single frame and exit (handy for scripting/screenshots). They
+run fine over SSH — so the same Pi can drive the HTML kiosk *and* a TTY.
+
 ## Customise
 
 - **Colours & per-state motion** — [`src/config.js`](src/config.js) (`PALETTES`, `STATE_PRESETS`,
@@ -177,5 +199,10 @@ views/                                       standalone single-file displays (no
   agents.html      datacenter.html           green-phosphor CRT pixel-agent scenes
   terminal.html                              green-phosphor CRT terminal
   pixel-amber.html tui.html                  8-bit amber + btop-style TUI
+terminal/                                    ANSI terminal versions of every view (Node, zero deps)
+  index.js                                   interactive picker / launcher
+  dashboard.js                               Mission Control (the main dashboard)
+  agents.js datacenter.js terminal.js        the themed views, one standalone file each
+  pixel-amber.js tui.js
 screenshots/                                 the images in this README
 ```
