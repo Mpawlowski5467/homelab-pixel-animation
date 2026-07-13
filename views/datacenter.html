@@ -105,6 +105,9 @@
     78%      { filter: brightness(1.02); }
     79%      { filter: brightness(1.00); }
   }
+  @media (prefers-reduced-motion: reduce) {
+    #stage, #roll { animation: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -310,7 +313,8 @@
   }
 
   // =========================================================================
-  // SECTORS — 7 labelled equipment zones in two rows around the central aisle.
+  // RACK BANKS — 12 dense server banks in three physical rows. Every bank is
+  // live and maps to one of the existing telemetry pools.
   // STATUS-LINE FACTORIES — lowercase, matching the reference phrasing.
   // ~14% chance of an amber WARN line.
   // =========================================================================
@@ -403,47 +407,45 @@
 
   // Sector accent palette per the spec.
   var SECTORS = [
-    { name: "COMPUTE",      accent: "#e8a13c", row: "top" },   // amber
-    { name: "STORAGE",      accent: "#46d6ff", row: "top" },   // cyan
-    { name: "NETWORK",      accent: "#5dff8b", row: "top" },   // green
-    { name: "MONITORING",   accent: "#8aa0ff", row: "top" },   // blue
-    { name: "POWER·UPS",    accent: "#e8d44c", row: "bot" },   // yellow
-    { name: "COOLING",      accent: "#79d4ff", row: "bot" },   // ice-blue
-    { name: "BACKUP VAULT", accent: "#ff5db1", row: "bot" }    // magenta
+    { rack: "A01", name: "COMPUTE",      service: "COMPUTE",      accent: "#e8a13c", row: 0, col: 0 },
+    { rack: "A02", name: "VM CLUSTER",   service: "COMPUTE",      accent: "#ffb347", row: 0, col: 1 },
+    { rack: "A03", name: "STORAGE",      service: "STORAGE",      accent: "#46d6ff", row: 0, col: 2 },
+    { rack: "A04", name: "OBJECT STORE", service: "STORAGE",      accent: "#79d4ff", row: 0, col: 3 },
+
+    { rack: "B01", name: "NETWORK",      service: "NETWORK",      accent: "#5dff8b", row: 1, col: 0 },
+    { rack: "B02", name: "MONITORING",   service: "MONITORING",   accent: "#8aa0ff", row: 1, col: 1 },
+    { rack: "B03", name: "CORE SERVICES",service: "NETWORK",      accent: "#6dffba", row: 1, col: 2 },
+    { rack: "B04", name: "POWER · UPS",  service: "POWER·UPS",    accent: "#e8d44c", row: 1, col: 3 },
+
+    { rack: "C01", name: "COOLING",      service: "COOLING",      accent: "#79d4ff", row: 2, col: 0 },
+    { rack: "C02", name: "BACKUP VAULT", service: "BACKUP VAULT", accent: "#ff5db1", row: 2, col: 1 },
+    { rack: "C03", name: "ARCHIVE",      service: "BACKUP VAULT", accent: "#d86dff", row: 2, col: 2 },
+    { rack: "C04", name: "EDGE CACHE",   service: "COMPUTE",      accent: "#a0ff5d", row: 2, col: 3 }
   ];
 
   // ---- LAYOUT (logical 1280×400) ------------------------------------------
-  var HEAD_H   = 48;     // header band 0..48
-  var AISLE_Y  = 226;    // walking-highway centerline
-  var AISLE_H  = 30;     // highway band thickness
-
-  // Top row: 4 pads, centers at x ≈ 190,490,790,1090, pad top y=96.
-  var TOP_CX   = [190, 490, 790, 1090];
-  var TOP_PADW = 210, TOP_PADH = 84, TOP_PADY = 96;
-  var TOP_ACCESS = 196;  // agent stands just below the pad, toward the aisle
-
-  // Bottom row: 3 pads staggered into the gaps; centers x ≈ 360,690,1010, top y=280.
-  var BOT_CX   = [360, 690, 1010];
-  var BOT_PADW = 210, BOT_PADH = 80, BOT_PADY = 280;
-  var BOT_ACCESS = 258;  // agent stands just above the pad, toward the aisle
+  var HEAD_H   = 48;
+  var AISLE_H  = 22;
+  var LANE_Y   = [82, 170, 258, 346];
+  // Cross-corridors sit in the aligned gaps between rack banks, never through
+  // the server hardware. The two outer corridors close the patrol loop.
+  var CROSS_X  = [28, 332, 640, 948, 1252];
+  var BANK_CX  = [178, 486, 794, 1102];
+  var BANK_W   = 246;
+  var RACK_ROWS = [
+    { y: 94,  h: 42 },
+    { y: 182, h: 42 },
+    { y: 270, h: 42 }
+  ];
 
   (function layoutSectors() {
-    var ti = 0, bi = 0;
     for (var i = 0; i < SECTORS.length; i++) {
       var S = SECTORS[i];
-      if (S.row === "top") {
-        S.cx = TOP_CX[ti++];
-        S.w = TOP_PADW; S.h = TOP_PADH;
-        S.x = Math.round(S.cx - S.w / 2);
-        S.y = TOP_PADY;
-        S.accessY = TOP_ACCESS;
-      } else {
-        S.cx = BOT_CX[bi++];
-        S.w = BOT_PADW; S.h = BOT_PADH;
-        S.x = Math.round(S.cx - S.w / 2);
-        S.y = BOT_PADY;
-        S.accessY = BOT_ACCESS;
-      }
+      var row = RACK_ROWS[S.row];
+      S.cx = BANK_CX[S.col];
+      S.w = BANK_W; S.h = row.h;
+      S.x = Math.round(S.cx - S.w / 2);
+      S.y = row.y;
       buildCabinets(S);
     }
   })();
@@ -452,21 +454,20 @@
   // LED blink data is built ONCE (no per-frame allocation; we just draw richer).
   function buildCabinets(S) {
     S.cabs = [];
-    var n = 3;
-    var padInX = 12;                 // horizontal inset from pad edge
-    var gap = 10;                    // gap between cabinets
+    var n = 4;
+    var padInX = 6;
+    var gap = 5;
     var availW = S.w - padInX * 2;
-    var cw = Math.floor((availW - gap * (n - 1)) / n);  // ~56
-    // Cabinet vertical extent inside the pad (leave a margin top & bottom).
-    var inTop = S.y + 8;
+    var cw = Math.floor((availW - gap * (n - 1)) / n);
+    // Compact rack faces sit below the bank's built-in identity rail.
+    var inTop = S.y + 13;
     var inH   = S.h - 16;
     for (var i = 0; i < n; i++) {
       var cx = S.x + padInX + i * (cw + gap);
       var cab = { x: cx, y: inTop, w: cw, h: inH, leds: [], slots: [] };
-      // 6–8 horizontal U-slot lines down the face
-      var slotCount = 7;
-      var headBar = 7;                       // header strip height
-      var faceTop = inTop + headBar + 2;
+      var slotCount = 4;
+      var headBar = 3;
+      var faceTop = inTop + headBar + 1;
       var faceBot = inTop + inH - 3;
       var faceH = faceBot - faceTop;
       var slotStep = faceH / slotCount;
@@ -474,7 +475,7 @@
         var sy = Math.round(faceTop + u * slotStep + slotStep * 0.5);
         cab.slots.push(sy);
         // 1–2 tiny LEDs near the left rail per slot
-        var ledN = (Math.random() < 0.45) ? 2 : 1;
+        var ledN = (Math.random() < 0.35) ? 2 : 1;
         for (var d = 0; d < ledN; d++) {
           cab.leds.push({
             x: cx + 5 + d * 5,
@@ -490,8 +491,7 @@
     }
   }
 
-  // sector "aisle column" the agent walks to before turning into the access point
-  function sectorAisleX(S) { return S.cx; }
+  function sectorLaneY(S, lane) { return LANE_Y[lane == null ? S.row : lane]; }
 
   // pretty sector name for the bubble header ("POWER·UPS" -> "POWER · UPS")
   function prettyName(name) {
@@ -535,10 +535,11 @@
   var LEG_WALK_A= ".2.......2.";
   var LEG_WALK_B= "...2...2...";
 
-  // Render a hooded agent sprite. anchor (fx,fy) = FEET center (bottom-center).
-  // pal = {hoodT, robe, shade, visor, eye}. legRow string for current frame.
-  // flip mirrors horizontally. bob = small vertical bob while walking.
-  function drawAgent(fx, fy, pal, legRow, flip, bob) {
+  // Render a hooded agent sprite. Vertical travel has a real front/back pose:
+  // agents facing up show the closed hood, while down/side poses show the visor.
+  function drawAgent(fx, fy, pal, legRow, facing, bob) {
+    var flip = facing === "left";
+    var facingAway = facing === "up";
     var left = Math.round(fx - AGENT_W / 2);
     var top  = Math.round(fy - AGENT_H) + bob;
     var r, c, code, col, gc;
@@ -550,29 +551,38 @@
         if (code === 1) col = pal.robe;
         else if (code === 2) col = pal.shade;
         else if (code === 3) col = pal.hoodT;
-        else col = pal.visor;
+        else col = facingAway ? pal.hoodT : pal.visor;
         gc = flip ? (SP_COLS - 1 - c) : c;
         ctx.fillStyle = col;
         ctx.fillRect(left + gc * PX, top + r * PX, PX, PX);
       }
     }
-    // darker "eye" pixels inside the visor (rows 4–5, a couple of cols)
-    ctx.fillStyle = pal.eye;
-    var e1 = flip ? (SP_COLS - 1 - 3) : 3;
-    var e2 = flip ? (SP_COLS - 1 - 7) : 7;
-    ctx.fillRect(left + e1 * PX, top + 4 * PX, PX, PX);
-    ctx.fillRect(left + e2 * PX, top + 4 * PX, PX, PX);
+    if (facingAway) {
+      irect(left + 5 * PX, top + 3 * PX, PX, 4 * PX, pal.shade);
+    } else {
+      ctx.fillStyle = pal.eye;
+      var e1 = flip ? (SP_COLS - 1 - 3) : 3;
+      var e2 = flip ? (SP_COLS - 1 - 7) : 7;
+      if (facing === "left" || facing === "right") {
+        ctx.fillRect(left + (facing === "left" ? e1 : e2) * PX, top + 4 * PX, PX, PX);
+      } else {
+        ctx.fillRect(left + e1 * PX, top + 4 * PX, PX, PX);
+        ctx.fillRect(left + e2 * PX, top + 4 * PX, PX, PX);
+      }
+    }
 
     // additive GLOW HALO around the visor — the signature lit-monitor face.
-    ctx.globalCompositeOperation = "lighter";
-    var vx = left + 4 * PX, vy = top + 3 * PX, vw = 3 * PX, vh = 3 * PX;
-    ctx.fillStyle = pal.visor;
-    ctx.globalAlpha = 0.20;
-    ctx.fillRect(vx - 3, vy - 3, vw + 6, vh + 6);
-    ctx.globalAlpha = 0.16;
-    ctx.fillRect(vx - 6, vy - 5, vw + 12, vh + 10);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = "source-over";
+    if (!facingAway) {
+      ctx.globalCompositeOperation = "lighter";
+      var vx = left + 4 * PX, vy = top + 3 * PX, vw = 3 * PX, vh = 3 * PX;
+      ctx.fillStyle = pal.visor;
+      ctx.globalAlpha = 0.20;
+      ctx.fillRect(vx - 3, vy - 3, vw + 6, vh + 6);
+      ctx.globalAlpha = 0.16;
+      ctx.fillRect(vx - 6, vy - 5, vw + 12, vh + 10);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
+    }
   }
 
   // Soft drop shadow ellipse beneath the feet (depth cue).
@@ -586,20 +596,23 @@
     ctx.restore();
   }
 
-  function makeAgent(name, accent, startX) {
+  function makeAgent(name, accent, startX, startLane, id) {
     return {
+      id: id,
       name: name,
       accent: accent,
       // robe greens shared across all agents (same family); visor = accent.
       pal: { hoodT: "#2a8f4e", robe: "#1c7d40", shade: "#0f4f28",
              visor: accent, eye: "#06210f" },
-      x: startX, y: AISLE_Y,        // foot/anchor position
-      dir: 1,                       // facing: 1 right, -1 left
-      faceFlip: false,
+      x: startX, y: LANE_Y[startLane],
+      lane: startLane,
+      facing: "right",
       target: null,                 // current sector object
+      targetLane: -1,               // chosen service side of the target rack
       lastSector: null,             // to avoid immediate repeat
       phase: "pick",                // pick|route|arrive|speak
-      leg: 0,                       // route leg index
+      route: [], routeAt: 0, crossAt: -1,
+      blockedFor: 0,                // collision wait watchdog
       frame: 0, stepAcc: 0,         // walk animation
       moving: false,
       bob: 0,
@@ -612,15 +625,15 @@
 
   // Keep the existing name→accent assignment (distinct visor colors).
   var agents = [
-    makeAgent("ATLAS",  "#46e8ff", 190),  // cyan
-    makeAgent("ARGUS",  "#7fb8ff", 420),  // blue
-    makeAgent("VESTA",  "#ff5ce0", 640),  // magenta
-    makeAgent("HERMES", "#ffb347", 860),  // amber
-    makeAgent("NOVA",   "#a0ff5d", 1060)  // lime
+    makeAgent("ATLAS",  "#46e8ff", 150,  0, 0),
+    makeAgent("ARGUS",  "#7fb8ff", 380,  1, 1),
+    makeAgent("VESTA",  "#ff5ce0", 620,  2, 2),
+    makeAgent("HERMES", "#ffb347", 860,  3, 3),
+    makeAgent("NOVA",   "#a0ff5d", 1100, 1, 4)
   ];
   // stagger initial thinking so they don't all pick on the same tick
-  agents[0].think = 0.2; agents[1].think = 0.9; agents[2].think = 1.5;
-  agents[3].think = 2.1; agents[4].think = 2.7;
+  agents[0].think = 0.1; agents[1].think = 0.4; agents[2].think = 0.7;
+  agents[3].think = 1.0; agents[4].think = 1.3;
 
   // A sector is "claimed" while it is some agent's target.
   function isClaimed(S) {
@@ -632,19 +645,27 @@
     var cands = [];
     for (var i = 0; i < SECTORS.length; i++) {
       var S = SECTORS[i];
+      if (S.targetable === false) continue;
       if (S === a.lastSector) continue;
       if (isClaimed(S)) continue;
       cands.push(S);
     }
     if (cands.length === 0) {
-      for (var j = 0; j < SECTORS.length; j++) if (!isClaimed(SECTORS[j])) cands.push(SECTORS[j]);
+      for (var j = 0; j < SECTORS.length; j++) {
+        if (SECTORS[j].targetable !== false && !isClaimed(SECTORS[j])) cands.push(SECTORS[j]);
+      }
     }
     if (cands.length === 0) return null;
+    // Usually switch physical rack rows so the whole hall stays active.
+    if (a.lastSector && Math.random() < 0.72) {
+      var across = cands.filter(function (S) { return S.row !== a.lastSector.row; });
+      if (across.length) cands = across;
+    }
     return cands[(Math.random() * cands.length) | 0];
   }
 
   function buildLine(a) {
-    var pool = L[a.target.name];
+    var pool = L[a.target.service];
     if (Math.random() < 0.14 && pool.warn.length) {
       a.warn = true;
       return pool.warn[(Math.random() * pool.warn.length) | 0]();
@@ -653,20 +674,172 @@
     return pool.ok[(Math.random() * pool.ok.length) | 0]();
   }
 
-  // movement speed (logical px / sec) — scaled up ~3x for the bigger space.
-  var SPEED = 108;
-  var TYPE_S = 0.05;     // seconds per typed character
+  var motionQuery = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  var reducedMotion = !!(motionQuery && motionQuery.matches);
+  if (motionQuery) {
+    var onMotionChange = function (e) { reducedMotion = e.matches; };
+    if (motionQuery.addEventListener) motionQuery.addEventListener("change", onMotionChange);
+    else if (motionQuery.addListener) motionQuery.addListener(onMotionChange);
+  }
+
+  var SPEED = 82;
+  var TYPE_S = 0.04;     // seconds per typed character
+  var crossClaims = [null, null, null, null, null];
+
+  function targetBayX(a) {
+    var cabs = a.target.cabs;
+    var cab = cabs[a.bayIndex % cabs.length];
+    return Math.round(cab.x + cab.w / 2);
+  }
+
+  function chooseTargetLane(a) {
+    var north = a.target.row;
+    var south = a.target.row + 1;
+    var northD = Math.abs(a.lane - north);
+    var southD = Math.abs(a.lane - south);
+    // Most trips use the farther service side, which makes agents circulate
+    // around rack rows instead of stopping on whichever aisle is nearest.
+    if (Math.random() < 0.64) {
+      if (northD === southD) return ((a.id + a.target.col) & 1) ? south : north;
+      return northD > southD ? north : south;
+    }
+    if (northD === southD) return ((a.id + a.target.col) & 1) ? north : south;
+    return northD < southD ? north : south;
+  }
+
+  function addPoint(route, x, y) {
+    var last = route.length ? route[route.length - 1] : null;
+    if (!last || Math.abs(last.x - x) > 0.1 || Math.abs(last.y - y) > 0.1) route.push({ x: x, y: y });
+  }
+
+  function addHorizontal(route, fromX, toX, laneY) {
+    if (Math.abs(toX - fromX) < 1) return;
+    var trackY = laneY + (toX > fromX ? -4 : 4);
+    addPoint(route, fromX, trackY);
+    addPoint(route, toX, trackY);
+    addPoint(route, toX, laneY);
+  }
+
+  function reserveCross(a, targetX) {
+    var ranked = CROSS_X.map(function (x, i) { return { i: i, d: Math.abs(x - targetX) }; });
+    ranked.sort(function (p, q) { return p.d - q.d; });
+    for (var r = 0; r < ranked.length; r++) {
+      var idx = ranked[r].i;
+      if (crossClaims[idx] == null) { crossClaims[idx] = a.id; return idx; }
+    }
+    return -1;
+  }
+
+  function releaseCross(a) {
+    if (a.crossAt >= 0 && crossClaims[a.crossAt] === a.id) crossClaims[a.crossAt] = null;
+    a.crossAt = -1;
+  }
+
+  // Build a bounded Manhattan route around the rack rows. One reservation owns
+  // an entire cross-corridor, even when a trip spans several horizontal aisles.
+  function buildRoute(a) {
+    var startLaneIndex = a.lane;
+    var targetLaneIndex = a.targetLane;
+    var startLane = LANE_Y[startLaneIndex], targetLane = LANE_Y[targetLaneIndex];
+    var bayX = targetBayX(a);
+    var route = [];
+    addPoint(route, a.x, startLane);
+    var cursorX = a.x;
+    if (startLaneIndex !== targetLaneIndex) {
+      a.crossAt = reserveCross(a, (a.x + bayX) * 0.5);
+      if (a.crossAt < 0) return false;
+      var crossX = CROSS_X[a.crossAt];
+      addHorizontal(route, cursorX, crossX, startLane);
+      addPoint(route, crossX, targetLane);
+      cursorX = crossX;
+    }
+    addHorizontal(route, cursorX, bayX, targetLane);
+    addPoint(route, bayX, targetLane);
+    a.route = route;
+    a.routeAt = 0;
+    return true;
+  }
+
+  function routeVector(a) {
+    if (!a.moving || a.phase !== "route") return null;
+    var wp = a.route[a.routeAt];
+    if (!wp) return null;
+    return { x: wp.x - a.x, y: wp.y - a.y };
+  }
+
+  function stepIsClear(a, nx, ny, dx, dy) {
+    var horizontal = Math.abs(dx) >= Math.abs(dy);
+    var direction = horizontal ? (dx > 0 ? 1 : -1) : (dy > 0 ? 1 : -1);
+    for (var i = 0; i < agents.length; i++) {
+      var other = agents[i];
+      if (other === a) continue;
+      var ov = routeVector(other);
+      if (!ov) continue;
+      var otherHorizontal = Math.abs(ov.x) >= Math.abs(ov.y);
+      if (horizontal !== otherHorizontal) {
+        // Vertical walkers have deterministic right-of-way through a reserved
+        // cross-aisle; horizontal walkers briefly yield at the intersection.
+        if (horizontal && Math.abs(nx - other.x) < 19 && Math.abs(ny - other.y) < 8) return false;
+        continue;
+      }
+      var otherDirection = horizontal ? (ov.x > 0 ? 1 : -1) : (ov.y > 0 ? 1 : -1);
+      if (direction !== otherDirection) {
+        // Directional tracks normally keep these agents apart. The ID tie-break
+        // makes the rare ambiguous merge deterministic instead of symmetric.
+        if (a.id > other.id && Math.abs(nx - other.x) < 19 && Math.abs(ny - other.y) < 8) return false;
+        continue;
+      }
+
+      // Only a genuine same-direction follower yields. Opposing horizontal
+      // traffic has its own track, and vertical traffic owns a reserved aisle.
+      if (horizontal) {
+        var aheadX = direction > 0 ? other.x > a.x : other.x < a.x;
+        if (aheadX && Math.abs(ny - other.y) < 5 && Math.abs(nx - other.x) < 25) return false;
+      } else {
+        var aheadY = direction > 0 ? other.y > a.y : other.y < a.y;
+        if (aheadY && Math.abs(nx - other.x) < 5 && Math.abs(ny - other.y) < 25) return false;
+      }
+    }
+    return true;
+  }
 
   // Move the agent's anchor toward (tx,ty) at SPEED*dt; returns true on arrival.
   function moveToward(a, tx, ty, dt) {
     var dx = tx - a.x, dy = ty - a.y;
     var d = Math.sqrt(dx * dx + dy * dy);
-    var stepLen = SPEED * dt;
-    if (d <= stepLen || d < 1.0) { a.x = tx; a.y = ty; return true; }
-    a.x += (dx / d) * stepLen;
-    a.y += (dy / d) * stepLen;
-    if (Math.abs(dx) > 0.4) { a.dir = dx > 0 ? 1 : -1; a.faceFlip = dx < 0; }
-    return false;
+    var stepLen = (reducedMotion ? 42 : SPEED) * dt;
+    var arrived = d <= stepLen || d < 1.0;
+    var nx = arrived ? tx : a.x + (dx / d) * stepLen;
+    var ny = arrived ? ty : a.y + (dy / d) * stepLen;
+    if (!stepIsClear(a, nx, ny, dx, dy)) {
+      a.blockedFor += dt;
+      return false;
+    } else {
+      a.blockedFor = 0;
+    }
+    a.x = clamp(nx, 18, W - 18);
+    a.y = clamp(ny, HEAD_H + AGENT_H, H - 10);
+    if (Math.abs(dx) > Math.abs(dy)) a.facing = dx > 0 ? "right" : "left";
+    else a.facing = dy > 0 ? "down" : "up";
+    return arrived;
+  }
+
+  function abortRoute(a) {
+    releaseCross(a);
+    a.lastSector = a.target;
+    a.target = null;
+    a.targetLane = -1;
+    a.route = [];
+    a.routeAt = 0;
+    var nearest = 0;
+    for (var li = 1; li < LANE_Y.length; li++) {
+      if (Math.abs(a.y - LANE_Y[li]) < Math.abs(a.y - LANE_Y[nearest])) nearest = li;
+    }
+    a.lane = nearest;
+    a.phase = "pick";
+    a.moving = false;
+    a.blockedFor = 0;
+    a.think = 0.12 + a.id * 0.09;
   }
 
   // Advance one agent's state machine + walk animation by fixed dt.
@@ -674,7 +847,7 @@
     if (a.moving) {
       a.stepAcc += dt;
       if (a.stepAcc >= 0.14) { a.stepAcc = 0; a.frame ^= 1; }
-      a.bob = (a.frame === 0) ? 0 : -1;     // tiny vertical bob
+      a.bob = reducedMotion ? 0 : ((a.frame === 0) ? 0 : -1);
     } else {
       a.bob = 0;
     }
@@ -686,9 +859,16 @@
         var S = pickSector(a);
         if (S) {
           a.target = S;            // claim immediately (fan-out)
-          a.phase = "route";
-          a.leg = 0;
-          a.moving = true;
+          a.targetLane = chooseTargetLane(a);
+          a.bayIndex = (Math.random() * S.cabs.length) | 0;
+          if (buildRoute(a)) {
+            a.phase = "route";
+            a.moving = true;
+          } else {
+            a.target = null;
+            a.targetLane = -1;
+            a.think = rnd(0.3, 0.7);
+          }
         } else {
           a.think = rnd(0.4, 1.0);
         }
@@ -698,34 +878,28 @@
 
     if (a.phase === "route") {
       a.moving = true;
-      var Sr = a.target;
-      // LEG 0: get onto the aisle centerline (vertical move to AISLE_Y)
-      if (a.leg === 0) {
-        if (moveToward(a, a.x, AISLE_Y, dt)) a.leg = 1;
+      var wp = a.route[a.routeAt];
+      if (wp && moveToward(a, wp.x, wp.y, dt)) a.routeAt++;
+      if (a.blockedFor > 2.0) {
+        abortRoute(a);
         return;
       }
-      // LEG 1: travel along the aisle to the sector's column (horizontal)
-      if (a.leg === 1) {
-        if (moveToward(a, sectorAisleX(Sr), AISLE_Y, dt)) a.leg = 2;
-        return;
+      if (a.routeAt >= a.route.length) {
+        a.lane = a.targetLane;
+        releaseCross(a);
+        a.phase = "arrive";
       }
-      // LEG 2: leave the aisle toward the sector's access point (vertical)
-      if (a.leg === 2) {
-        if (moveToward(a, Sr.cx, Sr.accessY, dt)) {
-          a.phase = "arrive";
-        }
-        return;
-      }
+      return;
     }
 
     if (a.phase === "arrive") {
       a.moving = false;
       a.line = buildLine(a);
       a.shown = 0; a.typeAcc = 0;
-      a.holdAcc = 0; a.holdFor = rnd(3.4, 4.6);
+      a.holdAcc = 0; a.holdFor = rnd(1.2, 2.0);
       a.phase = "speak";
-      // face toward the pad for a settled look (target's column vs. our x)
-      if (a.target) a.faceFlip = (a.target.cx < a.x);
+      // The lane north of a rack faces down; its south lane faces up.
+      if (a.target) a.facing = a.targetLane === a.target.row ? "down" : "up";
       return;
     }
 
@@ -739,10 +913,12 @@
         a.holdAcc += dt;
         if (a.holdAcc >= a.holdFor) {
           a.lastSector = a.target;
+          releaseCross(a);
           a.target = null;
+          a.targetLane = -1;
           a.line = ""; a.shown = 0;
           a.phase = "pick";
-          a.think = rnd(0.2, 1.1);
+          a.think = rnd(0.08, 0.35);
         }
       }
       return;
@@ -755,7 +931,7 @@
   var metaIdx = 0;
   function metaLine() {
     switch (metaIdx % 5) {
-      case 0: return "7 sectors · " + store.containers + " containers";
+      case 0: return "48 racks · " + store.containers + " containers";
       case 1: return "5 agents on floor";
       case 2: return "uptime " + fmtUptime();
       case 3: return "backup ✓ 02:00";
@@ -790,48 +966,47 @@
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // central walking-highway band (slightly different shade)
-    var ay0 = AISLE_Y - (AISLE_H >> 1);
-    rect(0, ay0, W, AISLE_H, C.aisle);
-    hline(0, W, ay0, C.phosFaint, 0.6);
-    hline(0, W, ay0 + AISLE_H, C.phosFaint, 0.6);
-
-    // animated dashed centerline (dashes march slowly)
-    ctx.strokeStyle = C.phosLo;
-    ctx.lineWidth = 2;
-    ctx.globalAlpha = 0.85;
-    ctx.setLineDash([18, 18]);
-    ctx.lineDashOffset = -dashPhase;
-    ctx.beginPath();
-    ctx.moveTo(0, AISLE_Y + 0.5);
-    ctx.lineTo(W, AISLE_Y + 0.5);
-    ctx.stroke();
+    // Four service aisles wrap the three rack rows. Five aligned cross-
+    // corridors form a complete walking grid through the rack-bank gaps.
+    for (var li = 0; li < LANE_Y.length; li++) {
+      var ly = LANE_Y[li], ly0 = ly - (AISLE_H >> 1);
+      rect(0, ly0, W, AISLE_H, C.aisle);
+      hline(0, W, ly0, C.phosFaint, 0.7);
+      hline(0, W, ly0 + AISLE_H, C.phosFaint, 0.7);
+      ctx.strokeStyle = C.phosLo;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.72;
+      ctx.setLineDash([18, 18]);
+      ctx.lineDashOffset = (li ? dashPhase : -dashPhase);
+      ctx.beginPath(); ctx.moveTo(0, ly + 0.5); ctx.lineTo(W, ly + 0.5); ctx.stroke();
+    }
     ctx.setLineDash([]);
+    for (var ci = 0; ci < CROSS_X.length; ci++) {
+      var cx = CROSS_X[ci], cw = 24;
+      rect(cx - cw / 2, LANE_Y[0], cw, LANE_Y[LANE_Y.length - 1] - LANE_Y[0], C.aisle);
+      vline(cx - cw / 2, LANE_Y[0], LANE_Y[LANE_Y.length - 1], C.phosFaint, 0.65);
+      vline(cx + cw / 2, LANE_Y[0], LANE_Y[LANE_Y.length - 1], C.phosFaint, 0.65);
+      ctx.globalAlpha = 0.65;
+      for (var py = LANE_Y[0] + 9; py < LANE_Y[LANE_Y.length - 1] - 5; py += 18) irect(cx - 1, py, 2, 8, C.phosLo);
+    }
     ctx.globalAlpha = 1;
   }
 
-  // ---- SECTOR PAD frame: thin border + prominent L-corner brackets ---------
+  // ---- DENSE RACK-BANK FRAME ----------------------------------------------
   function drawSectorFrame(S, active) {
     var x = S.x, y = S.y, w = S.w, h = S.h, col = S.accent;
-
-    // thin accent border at low alpha
-    ctx.globalAlpha = active ? 0.85 : 0.5;
+    ctx.globalAlpha = active ? 0.95 : 0.55;
     ctx.strokeStyle = col;
     ctx.lineWidth = 1;
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.globalAlpha = active ? 0.22 : 0.10;
+    irect(x + 1, y + 1, w - 2, 11, col);
+    ctx.globalAlpha = 0.8;
+    irect(x, y, 2, h, col);
+    irect(x + w - 2, y, 2, h, col);
+    irect(x + 6, y + h, 12, 2, C.cabShade);
+    irect(x + w - 18, y + h, 12, 2, C.cabShade);
     ctx.globalAlpha = 1;
-
-    // prominent L-shaped corner brackets (full accent, ~2px thick, ~16px legs)
-    var lg = 16, th = 2;
-    ctx.fillStyle = col;
-    // TL
-    ctx.fillRect(x, y, lg, th);            ctx.fillRect(x, y, th, lg);
-    // TR
-    ctx.fillRect(x + w - lg, y, lg, th);   ctx.fillRect(x + w - th, y, th, lg);
-    // BL
-    ctx.fillRect(x, y + h - th, lg, th);   ctx.fillRect(x, y + h - lg, th, lg);
-    // BR
-    ctx.fillRect(x + w - lg, y + h - th, lg, th); ctx.fillRect(x + w - th, y + h - lg, th, lg);
   }
 
   // ---- CABINETS: detailed dark racks with header strip, rails, U-slots, LEDs -
@@ -851,19 +1026,19 @@
       ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
       ctx.globalAlpha = 1;
 
-      // header bar strip across the top (~7px, accent low alpha)
+      // tiny cabinet controller strip
       ctx.globalAlpha = 0.35;
-      irect(cx + 1, cy + 1, cw - 2, 6, S.accent);
+      irect(cx + 1, cy + 1, cw - 2, 3, S.accent);
       ctx.globalAlpha = 1;
       // a couple of header notch pixels (bright)
       ctx.globalAlpha = 0.7;
-      irect(cx + cw - 6, cy + 2, 2, 4, S.accent);
-      irect(cx + cw - 10, cy + 2, 2, 4, S.accent);
+      irect(cx + cw - 5, cy + 1, 2, 2, S.accent);
+      irect(cx + cw - 9, cy + 1, 2, 2, S.accent);
       ctx.globalAlpha = 1;
 
       // thin side rails
-      irect(cx + 2, cy + 9, 1, ch - 11, C.cabShade);
-      irect(cx + cw - 3, cy + 9, 1, ch - 11, C.cabShade);
+      irect(cx + 2, cy + 5, 1, ch - 7, C.cabShade);
+      irect(cx + cw - 3, cy + 5, 1, ch - 7, C.cabShade);
 
       // U-slot horizontal lines + activity tick
       ctx.globalAlpha = 0.55;
@@ -895,13 +1070,14 @@
     }
   }
 
-  // ---- BRACKETED SECTOR LABEL (VT323) above/below the pad ------------------
+  // ---- COMPACT RACK IDENTITY RAIL -----------------------------------------
   function drawSectorLabel(S) {
-    var label = "[ " + S.name + " ]";
-    ctx.font = vt(26);
+    var label = S.rack + "  //  " + S.name;
+    ctx.font = stm(10);
     ctx.fillStyle = S.accent;
-    var y = (S.row === "top") ? S.y - 14 : S.y + S.h + 26;
-    drawSpaced(label, S.cx, y, 2, "center");
+    ctx.globalAlpha = 0.92;
+    drawSpaced(label, S.x + 7, S.y + 10, 0.65, "left");
+    ctx.globalAlpha = 1;
   }
 
   // ---- ACCESS POINT tick on the aisle side of each pad ---------------------
@@ -909,66 +1085,42 @@
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = S.accent;
     var ax = S.cx;
-    if (S.row === "top") {
-      // small downward chevron toward the aisle
-      irect(ax - 1, S.y + S.h + 2, 2, 2, S.accent);
-      irect(ax - 4, S.y + S.h + 6, 9, 1, S.accent);
-    } else {
-      irect(ax - 1, S.y - 4, 2, 2, S.accent);
-      irect(ax - 4, S.y - 7, 9, 1, S.accent);
-    }
+    // Every row is serviceable from both adjacent aisles.
+    irect(ax - 1, S.y - 5, 2, 3, S.accent);
+    irect(ax - 4, S.y - 7, 9, 1, S.accent);
+    irect(ax - 1, S.y + S.h + 2, 2, 3, S.accent);
+    irect(ax - 4, S.y + S.h + 6, 9, 1, S.accent);
     ctx.globalAlpha = 1;
   }
 
-  // ---- SPEECH BUBBLE (two-line, typewriter, tail toward agent) -------------
+  // ---- COMPACT AISLE STATUS SIDECAR ---------------------------------------
   function drawBubble(ag) {
     var S = ag.target;
     if (!S) return;
-    var below = (S.row === "top");   // bubble sits in the aisle, BELOW top-row agents
     var accent = ag.warn ? C.amber : C.phos;
-    var nameLine = ag.name + " @ " + prettyName(S.name);
+    var nameLine = ag.name + " · " + S.rack;
     var statusLine = ag.line.substring(0, ag.shown);
-
-    // measure to size the box
+    ctx.font = stm(9);
+    var nameW = ctx.measureText(nameLine).width;
     ctx.font = stm(11);
-    var nameSp = 1.5;
-    var nameW = spacedWidth(nameLine.toUpperCase(), nameSp);
-    ctx.font = stm(17);
-    var statusW = ctx.measureText(ag.line).width;  // size to full line so box is stable
-
-    var padX = 10, padY = 8;
-    var lineGap = 6;
-    var nameH = 11, statH = 17;
+    var statusW = ctx.measureText(ag.line).width;
+    var padX = 6;
     var inW = Math.ceil(Math.max(nameW, statusW)) + padX * 2;
-    inW = Math.max(inW, 120);
-    var inH = padY + nameH + lineGap + statH + padY;
-
-    // horizontal placement: centered over the agent, clamped to 0..W
-    var bx = Math.round(ag.x - inW / 2);
-    if (bx < 8) bx = 8;
-    if (bx + inW > W - 8) bx = W - 8 - inW;
-
-    // vertical placement: in the open aisle
-    var tailH = 9, tailW = 14;
-    var by;
-    if (below) {
-      // top-row agent stands at y≈196 (above aisle); bubble below in aisle,
-      // tail on TOP pointing up at the agent.
-      by = ag.y + 16;
-    } else {
-      // bottom-row agent stands at y≈258 (below aisle); bubble above in aisle,
-      // tail on BOTTOM pointing down at the agent.
-      by = ag.y - AGENT_H - 16 - inH;
-    }
+    inW = clamp(inW, 92, 168);
+    var inH = 25;
+    var putRight = ag.x + AGENT_W / 2 + 10 + inW < W - 8;
+    var bx = Math.round(putRight ? ag.x + AGENT_W / 2 + 10 : ag.x - AGENT_W / 2 - 10 - inW);
+    var by = Math.round(ag.y - 28);
+    bx = clamp(bx, 8, W - 8 - inW);
+    by = clamp(by, HEAD_H + 3, H - inH - 3);
 
     // shadow/glow behind the bubble
     ctx.save();
     ctx.shadowColor = accent;
-    ctx.shadowBlur = 8;
-    // body
-    ctx.globalAlpha = 0.92;
+    ctx.shadowBlur = 5;
+    ctx.globalAlpha = 0.94;
     ctx.fillStyle = "#04140b";
-    roundRectPath(bx, by, inW, inH, 4);
+    roundRectPath(bx, by, inW, inH, 3);
     ctx.fill();
     ctx.restore();
 
@@ -976,53 +1128,27 @@
     ctx.globalAlpha = 1;
     ctx.strokeStyle = accent;
     ctx.lineWidth = 1;
-    roundRectPath(bx + 0.5, by + 0.5, inW - 1, inH - 1, 4);
+    roundRectPath(bx + 0.5, by + 0.5, inW - 1, inH - 1, 3);
     ctx.stroke();
 
-    // tail (filled triangle + matching border edge)
-    var tx = clamp(Math.round(ag.x), bx + 12, bx + inW - 12);
-    ctx.fillStyle = "#04140b";
-    ctx.beginPath();
-    if (below) {
-      ctx.moveTo(tx - tailW / 2, by + 1);
-      ctx.lineTo(tx + tailW / 2, by + 1);
-      ctx.lineTo(tx, by - tailH);
-    } else {
-      ctx.moveTo(tx - tailW / 2, by + inH - 1);
-      ctx.lineTo(tx + tailW / 2, by + inH - 1);
-      ctx.lineTo(tx, by + inH + tailH);
-    }
-    ctx.closePath();
-    ctx.fill();
-    // tail border edges
+    // Short horizontal leader line keeps the panel out of the walking sprite.
     ctx.strokeStyle = accent;
     ctx.beginPath();
-    if (below) {
-      ctx.moveTo(tx - tailW / 2, by + 0.5);
-      ctx.lineTo(tx, by - tailH);
-      ctx.lineTo(tx + tailW / 2, by + 0.5);
-    } else {
-      ctx.moveTo(tx - tailW / 2, by + inH - 0.5);
-      ctx.lineTo(tx, by + inH + tailH);
-      ctx.lineTo(tx + tailW / 2, by + inH - 0.5);
-    }
+    ctx.moveTo(putRight ? bx : bx + inW, by + inH - 5);
+    ctx.lineTo(putRight ? ag.x + AGENT_W / 2 : ag.x - AGENT_W / 2, ag.y - 5);
     ctx.stroke();
 
-    // LINE 1 — "<NAME> @ <SECTOR>" (small, accent green, letter-spaced, upper)
-    ctx.font = stm(11);
+    ctx.font = stm(9);
     ctx.fillStyle = accent;
-    drawSpaced(nameLine.toUpperCase(), bx + padX, by + padY + nameH - 2, nameSp, "left");
-
-    // LINE 2 — status line (larger, ivory, typewriter-revealed)
-    ctx.font = stm(17);
+    ctx.fillText(nameLine.toUpperCase(), bx + padX, by + 9);
+    ctx.font = stm(11);
     ctx.fillStyle = ag.warn ? C.amber : C.ivory;
-    var statY = by + padY + nameH + lineGap + statH - 3;
+    var statY = by + 21;
     ctx.fillText(statusLine, bx + padX, statY);
-    // blinking cursor while typing/holding
     if (bubbleBlink) {
       var cw2 = ctx.measureText(statusLine).width;
       ctx.fillStyle = accent;
-      ctx.fillRect(bx + padX + cw2 + 2, statY - statH + 4, 8, statH - 2);
+      ctx.fillRect(Math.min(bx + inW - 4, bx + padX + cw2 + 2), statY - 8, 4, 8);
     }
   }
 
@@ -1105,7 +1231,7 @@
       var legRow;
       if (!ag.moving) legRow = LEG_IDLE;
       else legRow = (ag.frame === 0) ? LEG_WALK_A : LEG_WALK_B;
-      drawAgent(ag.x, ag.y, ag.pal, legRow, ag.faceFlip, ag.bob);
+      drawAgent(ag.x, ag.y, ag.pal, legRow, ag.facing, ag.bob);
       // (no floating name tag — identity reads from the visor colour + the
       //  bubble's "NAME @ SECTOR" header on arrival, matching the reference)
     }
@@ -1149,7 +1275,7 @@
     if (tBlink >= 0.5) { tBlink -= 0.5; headCursor = !headCursor; bubbleBlink = !bubbleBlink; }
 
     // marching dashes on the highway (slow phase advance)
-    dashPhase += STEP * 16;
+    if (!reducedMotion) dashPhase += STEP * 16;
 
     // advance every agent's state machine
     for (var i = 0; i < agents.length; i++) tickAgent(agents[i], STEP);

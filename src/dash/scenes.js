@@ -14,6 +14,19 @@ window.App = window.App || {};
   }
   function mid(state) { return P.hexToRgb(C.PALETTES[state].mid); }
   var SLATE = { r: 176, g: 174, b: 165 };
+  var phaseCache = {};
+
+  // Stable per-id offsets keep repeated sparks lively without frame-time randomness.
+  function phaseFor(id) {
+    if (phaseCache[id] != null) return phaseCache[id];
+    var h = 2166136261;
+    for (var i = 0; i < id.length; i++) {
+      h ^= id.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    phaseCache[id] = (h >>> 0) / 4294967296;
+    return phaseCache[id];
+  }
 
   // ---------------- MISSION CONTROL ----------------
   function missionControl(ctx, t, BW, BH) {
@@ -25,7 +38,9 @@ window.App = window.App || {};
     ctx.fillRect(212, 14, 1, 74);
 
     // Left: aggregate health hero + stats
-    W.miniSpark(ctx, 44, 31, D.heroState(), t, { longLen: 20, shortLen: 11, thickness: 1.8, coreRadius: 4.3 });
+    W.miniSpark(ctx, 44, 31, D.heroState(), t, {
+      longLen: 20, shortLen: 11, thickness: 1.8, coreRadius: 4.3, phase: phaseFor('hero'),
+    });
     T.text(ctx, 'HOMELAB', 44, 50, P.rgbStr(mid('idle')), 7, 'center');
     var worst = D.worstState();
     var swCol = worst === 'error' ? mid('error') : worst === 'warning' ? mid('warning') : mid('success');
@@ -39,7 +54,9 @@ window.App = window.App || {};
     for (var i = 0; i < D.services.length; i++) {
       var s = D.services[i];
       var x = cols[i % 3], y = rows[(i / 3) | 0];
-      W.miniSpark(ctx, x, y, s.state, t, { longLen: 9, shortLen: 5, thickness: 1.0, coreRadius: 2 });
+      W.miniSpark(ctx, x, y, s.state, t, {
+        longLen: 9, shortLen: 5, thickness: 1.0, coreRadius: 2, phase: phaseFor(s.id),
+      });
       T.text(ctx, s.label, x, y + 9, P.rgbStr(mid(s.state)), 5, 'center');
       T.text(ctx, s.note ? s.note : (s.cpu + '%'), x, y + 15, P.rgba(mid(s.state), 0.72), 4, 'center');
     }
@@ -72,22 +89,48 @@ window.App = window.App || {};
     return null;
   }
 
+  // Keep node art and its 6px label above the ticker, without mutating live data.
+  function placedNode(nd) {
+    var labelOffset = nd.infra ? 7 : 8;
+    var maxY = 89 - labelOffset - App.font.H + 1;
+    return { x: nd.x, y: Math.min(nd.y, maxY) };
+  }
+
+  function trafficTrail(ctx, a, b, progress, color) {
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (!len) return;
+    var distance = progress * len;
+    var alpha = [0.96, 0.54, 0.28, 0.13];
+    // Paint tail-to-head so coincident rounded pixels finish with the bright head.
+    for (var j = alpha.length - 1; j >= 0; j--) {
+      var d = distance - j * 2;
+      if (d < 0) continue;
+      var p = d / len;
+      ctx.fillStyle = P.rgba(color, alpha[j]);
+      ctx.fillRect(Math.round(a.x + dx * p), Math.round(a.y + dy * p), 1, 1);
+    }
+  }
+
   function constellation(ctx, t, BW, BH) {
     bg(ctx, BW, BH);
     var nodes = D.nodes, links = D.links, i;
 
     // links
     for (i = 0; i < links.length; i++) {
-      var a = nodes[links[i][0]], b = nodes[links[i][1]];
+      var a = placedNode(nodes[links[i][0]]), b = placedNode(nodes[links[i][1]]);
       line(ctx, a.x, a.y, b.x, b.y, 'rgba(120,118,110,0.30)');
     }
-    // traffic dots (additive)
+    // State-coloured traffic packets with tiny pixel trails (additive, still cheap).
     ctx.globalCompositeOperation = 'lighter';
     for (i = 0; i < links.length; i++) {
-      var la = nodes[links[i][0]], lb = nodes[links[i][1]];
-      var p = ((t * 0.33) + i * 0.17) % 1;
-      ctx.fillStyle = 'rgba(217,119,87,0.95)';
-      ctx.fillRect(Math.round(la.x + (lb.x - la.x) * p), Math.round(la.y + (lb.y - la.y) * p), 1, 1);
+      var sourceId = links[i][0], targetId = links[i][1];
+      var la = placedNode(nodes[sourceId]), lb = placedNode(nodes[targetId]);
+      var packetPhase = phaseFor(sourceId + '>' + targetId);
+      var speed = 0.29 + (i % 3) * 0.025;
+      var p = ((App.reduceMotion ? 0 : t * speed) + packetPhase) % 1;
+      var targetSvc = svcById(targetId);
+      trafficTrail(ctx, la, lb, p, mid(targetSvc ? targetSvc.state : 'idle'));
     }
     ctx.globalCompositeOperation = 'source-over';
 
@@ -95,12 +138,14 @@ window.App = window.App || {};
     var keys = Object.keys(nodes);
     for (i = 0; i < keys.length; i++) {
       var k = keys[i], nd = nodes[k], svc = svcById(k);
+      var pos = placedNode(nd);
       var state = svc ? svc.state : 'idle';
       var size = nd.infra ? { longLen: 7, shortLen: 4, thickness: 0.9, coreRadius: 1.6 }
                           : { longLen: 9, shortLen: 5, thickness: 1.1, coreRadius: 2 };
-      W.miniSpark(ctx, nd.x, nd.y, state, t, size);
+      size.phase = phaseFor(k);
+      W.miniSpark(ctx, pos.x, pos.y, state, t, size);
       var col = nd.infra ? mid('idle') : mid(state);
-      T.text(ctx, nd.label || k.toUpperCase(), nd.x, nd.y + (nd.infra ? 7 : 8), P.rgbStr(col), 4, 'center');
+      T.text(ctx, nd.label || k.toUpperCase(), pos.x, pos.y + (nd.infra ? 7 : 8), P.rgbStr(col), 4, 'center');
     }
   }
 

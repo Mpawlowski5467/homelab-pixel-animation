@@ -80,7 +80,8 @@ window.App = window.App || {};
       bloom: { base: 0.6, gain: 0.85 },
       particles: { rate: 44, speed: 60, life: 0.7, spread: 'radial' },
       shake: { amp: 2.4, hz: 16, decay: true },
-      flash: { amp: 0.42, hz: 3.5 },
+      // Keep the takeover urgent without a harsh full-frame rapid strobe.
+      flash: { amp: 0.26, hz: 1.8 },
     },
   };
 

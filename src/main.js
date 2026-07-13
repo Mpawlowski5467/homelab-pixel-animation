@@ -24,6 +24,11 @@ window.App = window.App || {};
     var cx = RES / 2, cy = RES / 2;
 
     var messageText = null, lastColor = null;
+    var motionQuery = window.matchMedia
+      ? window.matchMedia('(prefers-reduced-motion: reduce)')
+      : null;
+    var pulsePhase = 0;
+    var rotation = 0;
 
     // Resolve the active palette, blending prev -> current during a cross-fade.
     function resolvePalette(frame) {
@@ -39,8 +44,14 @@ window.App = window.App || {};
       var frame = notifier.update(now);
       var preset = frame.preset;
       var pal = resolvePalette(frame);
-      var tsec = elapsed / 1000;
-      var wave = Math.sin(tsec * preset.pulseHz * TAU); // shared pulse phase
+      var reduceMotion = !!(motionQuery && motionQuery.matches);
+      var motionScale = reduceMotion ? 0.15 : 1;
+
+      // Integrate phase instead of deriving it from app uptime. Changing to a
+      // preset with a different speed now accelerates smoothly without a jump.
+      pulsePhase = (pulsePhase + dt * preset.pulseHz * TAU * motionScale) % TAU;
+      rotation = (rotation + dt * (preset.spinDegPerSec || 0) * Math.PI / 180 * motionScale) % TAU;
+      var wave = Math.sin(pulsePhase);
 
       // --- message overlay (only touch the DOM on change) ---
       if (frame.message !== messageText) {
@@ -58,18 +69,23 @@ window.App = window.App || {};
       ctx.fillRect(0, 0, RES, RES);
 
       // --- motion params from preset + time ---
-      var rotation = (preset.spinDegPerSec || 0) * tsec * Math.PI / 180;
-      if (preset.jitter) rotation += (Math.random() - 0.5) * preset.jitter * 0.1;
-      var pulse = preset.pulseShape === 'square'
-        ? 1 + preset.pulseDepth * (wave > 0 ? 1 : -1)
-        : 1 + preset.pulseDepth * wave;
+      var frameRotation = rotation;
+      if (!reduceMotion && preset.jitter) {
+        frameRotation += (Math.random() - 0.5) * preset.jitter * 0.1;
+      }
+      var pulseDepth = preset.pulseDepth * (reduceMotion ? 0.2 : 1);
+      var pulse = preset.pulseShape === 'square' && !reduceMotion
+        ? 1 + pulseDepth * (wave > 0 ? 1 : -1)
+        : 1 + pulseDepth * wave;
 
       var intensity = (preset.intensity == null ? 1 : preset.intensity);
       intensity *= 0.4 + 0.6 * frame.entry;             // fade the spark in
-      if (preset.flash) intensity *= (wave > 0 ? 1 : 0.55); // error strobe
+      if (preset.flash && !reduceMotion) intensity *= (wave > 0 ? 1 : 0.55); // error strobe
 
       // --- error shake translates the whole spark (integer only) ---
-      var sh = E.shakeOffset(preset.shake, elapsed, frame.duration);
+      var sh = reduceMotion
+        ? { x: 0, y: 0 }
+        : E.shakeOffset(preset.shake, frame.elapsed, frame.duration);
       ctx.save();
       if (sh.x || sh.y) ctx.translate(sh.x, sh.y);
 
@@ -85,7 +101,7 @@ window.App = window.App || {};
         longLen: C.SPARK.longLen,
         shortLen: C.SPARK.shortLen,
         thickness: C.SPARK.thickness,
-        rotation: rotation,
+        rotation: frameRotation,
         coreRadius: C.SPARK.coreRadius,
         palette: pal,
         intensity: intensity,
@@ -93,14 +109,16 @@ window.App = window.App || {};
       });
 
       // --- sparkle particles ---
-      particles.emit(cx, cy, preset.particles, dt);
+      if (!reduceMotion) particles.emit(cx, cy, preset.particles, dt);
       particles.update(dt);
-      particles.draw(ctx, pal);
+      if (!reduceMotion) particles.draw(ctx, pal);
 
       ctx.restore();
 
       // --- error flash overlays the full (un-shaken) frame ---
-      if (preset.flash) E.drawFlash(ctx, RES, RES, preset.flash, pal, elapsed);
+      if (preset.flash && !reduceMotion) {
+        E.drawFlash(ctx, RES, RES, preset.flash, pal, frame.elapsed);
+      }
 
       if (fpsEl && fps) fpsEl.textContent = fps + ' fps';
     });
