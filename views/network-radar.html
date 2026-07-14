@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LAN Spectrum · Network Radar · 1280×400</title>
+  <style>
+    :root { color-scheme: dark; --scale: 1; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden; background: #000;
+    }
+    body {
+      display: grid; place-items: center; cursor: none;
+      font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+    }
+    #stage {
+      position: absolute; left: 50%; top: 50%;
+      width: 1280px; height: 400px; overflow: hidden;
+      transform: translate(-50%, -50%) scale(var(--scale));
+      transform-origin: center;
+      background: #020708;
+      box-shadow: inset 0 0 0 1px #123437, 0 0 44px rgba(0, 238, 210, .07);
+    }
+    #radar {
+      display: block; width: 1280px; height: 400px;
+      image-rendering: pixelated;
+    }
+    #stage::before,
+    #stage::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none;
+    }
+    #stage::before {
+      z-index: 3;
+      background:
+        linear-gradient(102deg, transparent 0 64%, rgba(103, 255, 230, .018) 70%, transparent 78%),
+        radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, .47) 100%);
+    }
+    #stage::after {
+      z-index: 4; opacity: .62;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, .02) 0px,
+        rgba(0, 0, 0, .02) 1px,
+        rgba(0, 20, 18, .20) 2px,
+        rgba(0, 0, 0, .03) 3px
+      );
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #stage { box-shadow: inset 0 0 0 1px #123437; }
+    }
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <canvas id="radar" width="1280" height="400" role="img"
+      aria-label="Live homelab network radar with ten labeled devices, service health, and uplink telemetry"></canvas>
+    <p class="sr-only">A live status display for the homelab LAN. All ten monitored nodes are listed in the side panels.</p>
+  </main>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const W = 1280;
+    const H = 400;
+    const CX = 618;
+    const CY = 213;
+    const R = 166;
+    const TAU = Math.PI * 2;
+    const FRAME_MS = 1000 / 30;
+    const canvas = document.getElementById("radar");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const trail = document.createElement("canvas");
+    trail.width = W;
+    trail.height = H;
+    const fx = trail.getContext("2d");
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let reducedMotion = motionQuery.matches;
+    let lastFrame = 0;
+    let lastTick = performance.now() / 1000;
+    let nextTargetAt = 0;
+    let nextHistoryAt = 0;
+    let nextEventAt = 0;
+    let eventCursor = 0;
+
+    const C = {
+      bg: "#020708",
+      panel: "#041012",
+      panel2: "#061719",
+      grid: "#103437",
+      gridDim: "#0a2426",
+      green: "#52ff9b",
+      green2: "#19c977",
+      cyan: "#42f5e6",
+      cyan2: "#16a9ad",
+      amber: "#ffca58",
+      red: "#ff627c",
+      text: "#c5fff1",
+      soft: "#77bcb1",
+      dim: "#3e7772",
+      black: "#010405"
+    };
+
+    const telemetry = {
+      down: 684.2, downTarget: 684.2,
+      up: 118.4, upTarget: 118.4,
+      ping: 7.2, pingTarget: 7.2,
+      jitter: 0.8, jitterTarget: 0.8,
+      loss: 0.02, lossTarget: 0.02,
+      packets: 8421, packetsTarget: 8421,
+      sessions: 187, sessionsTarget: 187,
+      temp: 41.6, tempTarget: 41.6
+    };
+
+    const HISTORY = 72;
+    const netHistory = new Float32Array(HISTORY);
+    const pingHistory = new Float32Array(HISTORY);
+    let historyHead = 0;
+    for (let i = 0; i < HISTORY; i += 1) {
+      netHistory[i] = 52 + Math.sin(i * .24) * 12 + Math.sin(i * .07) * 8;
+      pingHistory[i] = 7 + Math.sin(i * .31) * 1.4;
+    }
+
+    const nodes = [
+      { id: "GATEWAY",    ip: "10.0.0.1",   a: -1.52, r: 52,  type: "core" },
+      { id: "PVE-01",     ip: "10.0.0.11",  a: -2.46, r: 108, type: "host" },
+      { id: "PVE-02",     ip: "10.0.0.12",  a: -0.70, r: 123, type: "host" },
+      { id: "NAS-01",     ip: "10.0.0.21",  a:  0.06, r: 145, type: "store" },
+      { id: "MEDIA",      ip: "10.0.0.31",  a:  0.70, r: 112, type: "svc" },
+      { id: "BACKUP",     ip: "10.0.0.22",  a:  1.34, r: 146, type: "store" },
+      { id: "HOME-AUTO",  ip: "10.0.0.41",  a:  2.08, r: 130, type: "svc" },
+      { id: "MONITOR",    ip: "10.0.0.51",  a:  2.72, r: 145, type: "svc" },
+      { id: "DNS",        ip: "10.0.0.53",  a: -2.95, r: 62,  type: "svc" },
+      { id: "VPN",        ip: "10.0.0.61",  a: -0.05, r: 70,  type: "edge" }
+    ];
+
+    for (const node of nodes) {
+      node.x = Math.round(CX + Math.cos(node.a) * node.r);
+      node.y = Math.round(CY + Math.sin(node.a) * node.r);
+    }
+
+    const links = [
+      { from: 0, to: 1, bend: -20, speed: 3.4, phase: .08 },
+      { from: 0, to: 2, bend:  22, speed: 3.1, phase: .54 },
+      { from: 1, to: 3, bend: -28, speed: 4.7, phase: .31 },
+      { from: 2, to: 4, bend:  24, speed: 3.8, phase: .68 },
+      { from: 3, to: 5, bend: -32, speed: 5.2, phase: .15 },
+      { from: 1, to: 6, bend:  38, speed: 4.4, phase: .79 },
+      { from: 0, to: 7, bend: -19, speed: 3.6, phase: .42 },
+      { from: 8, to: 0, bend:  18, speed: 2.8, phase: .92 },
+      { from: 0, to: 9, bend: -15, speed: 2.5, phase: .24 }
+    ];
+
+    const eventTemplates = [
+      ["ROUTE", "PVE-01 → NAS-01", "1.8 Gb/s"],
+      ["SYNC",  "BACKUP snapshot", "complete"],
+      ["DHCP",  "lease renewed",   "10.0.0.74"],
+      ["TLS",   "MEDIA handshake", "12 ms"],
+      ["DNS",   "cache refresh",   "healthy"],
+      ["VPN",   "tunnel rekey",    "success"],
+      ["PING",  "PVE-02 probe",    "6.4 ms"],
+      ["FLOW",  "WAN ingress",     "nominal"]
+    ];
+    const visibleEvents = [0, 1, 2, 3];
+
+    function fitStage() {
+      const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+      document.documentElement.style.setProperty("--scale", String(scale));
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function hashNoise(seed) {
+      const n = Math.sin(seed * 91.713 + 17.31) * 43758.5453;
+      return n - Math.floor(n);
+    }
+
+    function roundedRect(g, x, y, w, h, radius) {
+      g.beginPath();
+      g.moveTo(x + radius, y);
+      g.lineTo(x + w - radius, y);
+      g.quadraticCurveTo(x + w, y, x + w, y + radius);
+      g.lineTo(x + w, y + h - radius);
+      g.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+      g.lineTo(x + radius, y + h);
+      g.quadraticCurveTo(x, y + h, x, y + h - radius);
+      g.lineTo(x, y + radius);
+      g.quadraticCurveTo(x, y, x + radius, y);
+      g.closePath();
+    }
+
+    function line(x1, y1, x2, y2, color, alpha = 1, width = 1) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x1) + .5, Math.round(y1) + .5);
+      ctx.lineTo(Math.round(x2) + .5, Math.round(y2) + .5);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function text(value, x, y, size, color = C.text, align = "left", weight = 500) {
+      ctx.fillStyle = color;
+      ctx.font = `${weight} ${size}px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace`;
+      ctx.textAlign = align;
+      ctx.textBaseline = "alphabetic";
+      ctx.fillText(value, Math.round(x), Math.round(y));
+    }
+
+    function panel(x, y, w, h, title, code, accent = C.cyan) {
+      roundedRect(ctx, x, y, w, h, 4);
+      ctx.fillStyle = "rgba(4, 16, 18, .94)";
+      ctx.fill();
+      ctx.strokeStyle = C.grid;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = accent;
+      ctx.fillRect(x, y, 2, 18);
+      text(title, x + 12, y + 14, 10, accent, "left", 700);
+      text(code, x + w - 10, y + 14, 8, C.dim, "right", 600);
+      line(x + 8, y + 22, x + w - 8, y + 22, C.gridDim, 1);
+    }
+
+    function quadraticPoint(link, progress) {
+      const a = nodes[link.from];
+      const b = nodes[link.to];
+      const mx = (a.x + b.x) * .5;
+      const my = (a.y + b.y) * .5;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const length = Math.max(1, Math.hypot(dx, dy));
+      const qx = mx - dy / length * link.bend;
+      const qy = my + dx / length * link.bend;
+      const inv = 1 - progress;
+      return {
+        x: inv * inv * a.x + 2 * inv * progress * qx + progress * progress * b.x,
+        y: inv * inv * a.y + 2 * inv * progress * qy + progress * progress * b.y,
+        qx,
+        qy
+      };
+    }
+
+    function nodeState(index, t) {
+      const cycle = t % 42;
+      if ((index === 5 && cycle > 13 && cycle < 19) || (index === 7 && cycle > 30 && cycle < 35)) {
+        return "watch";
+      }
+      if (index === 9 || index === 0) return "route";
+      return "up";
+    }
+
+    function stateColor(state) {
+      if (state === "watch") return C.amber;
+      if (state === "route") return C.cyan;
+      return C.green;
+    }
+
+    function updateTelemetry(t, dt) {
+      if (t >= nextTargetAt) {
+        const seed = Math.floor(t / 1.35);
+        telemetry.downTarget = clamp(420 + hashNoise(seed + 1) * 440, 380, 930);
+        telemetry.upTarget = clamp(58 + hashNoise(seed + 2) * 126, 40, 210);
+        telemetry.pingTarget = clamp(5.2 + hashNoise(seed + 3) * 5.8, 4.8, 13.8);
+        telemetry.jitterTarget = clamp(.35 + hashNoise(seed + 4) * 1.4, .2, 2.1);
+        telemetry.lossTarget = hashNoise(seed + 5) > .88 ? .08 : .01 + hashNoise(seed + 8) * .025;
+        telemetry.packetsTarget = clamp(7100 + hashNoise(seed + 6) * 3800, 6800, 11200);
+        telemetry.sessionsTarget = clamp(154 + hashNoise(seed + 7) * 84, 130, 260);
+        telemetry.tempTarget = clamp(39 + hashNoise(seed + 9) * 6, 38, 47);
+        nextTargetAt = t + 1.35;
+      }
+
+      const ease = 1 - Math.pow(.025, Math.min(dt, .1));
+      telemetry.down = lerp(telemetry.down, telemetry.downTarget, ease);
+      telemetry.up = lerp(telemetry.up, telemetry.upTarget, ease);
+      telemetry.ping = lerp(telemetry.ping, telemetry.pingTarget, ease);
+      telemetry.jitter = lerp(telemetry.jitter, telemetry.jitterTarget, ease);
+      telemetry.loss = lerp(telemetry.loss, telemetry.lossTarget, ease);
+      telemetry.packets = lerp(telemetry.packets, telemetry.packetsTarget, ease);
+      telemetry.sessions = lerp(telemetry.sessions, telemetry.sessionsTarget, ease);
+      telemetry.temp = lerp(telemetry.temp, telemetry.tempTarget, ease);
+
+      if (t >= nextHistoryAt) {
+        netHistory[historyHead] = clamp(telemetry.down / 10, 0, 100);
+        pingHistory[historyHead] = telemetry.ping;
+        historyHead = (historyHead + 1) % HISTORY;
+        nextHistoryAt = t + .8;
+      }
+
+      if (t >= nextEventAt) {
+        eventCursor = (eventCursor + 1) % eventTemplates.length;
+        visibleEvents[3] = visibleEvents[2];
+        visibleEvents[2] = visibleEvents[1];
+        visibleEvents[1] = visibleEvents[0];
+        visibleEvents[0] = eventCursor;
+        nextEventAt = t + 4.2;
+      }
+    }
+
+    function drawBackdrop() {
+      ctx.fillStyle = C.bg;
+      ctx.fillRect(0, 0, W, H);
+
+      const glow = ctx.createRadialGradient(CX, CY, 20, CX, CY, 420);
+      glow.addColorStop(0, "rgba(18, 83, 75, .16)");
+      glow.addColorStop(.55, "rgba(5, 29, 29, .09)");
+      glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(220, 26, 780, 365);
+
+      ctx.fillStyle = "rgba(12, 42, 42, .16)";
+      for (let x = 240; x < 998; x += 8) {
+        for (let y = 38; y < 390; y += 8) {
+          if (((x + y) / 8) % 2 === 0) ctx.fillRect(x, y, 1, 1);
+        }
+      }
+
+      ctx.fillStyle = C.panel;
+      ctx.fillRect(0, 0, W, 27);
+      line(0, 26, W, 26, C.grid, 1);
+      ctx.fillStyle = C.cyan;
+      ctx.fillRect(0, 0, 4, 27);
+      text("LAN SPECTRUM", 16, 18, 11, C.cyan, "left", 800);
+      text("// ACTIVE NETWORK RADAR", 119, 18, 10, C.dim, "left", 700);
+      text("FIELD 10.0.0.0/24", 301, 18, 9, C.soft, "left", 600);
+      ctx.fillStyle = C.green;
+      ctx.fillRect(430, 11, 5, 5);
+      text("SENSORS ONLINE", 443, 18, 9, C.green, "left", 700);
+    }
+
+    function drawTopClock(t) {
+      const now = new Date();
+      const clock = now.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      const date = now.toLocaleDateString([], { month: "short", day: "2-digit" }).toUpperCase();
+      const sweep = reducedMotion ? "HOLD" : `${Math.floor((t % 6.4) / 6.4 * 360).toString().padStart(3, "0")}°`;
+      text(`SWEEP ${sweep}`, 1034, 18, 9, C.soft, "right", 700);
+      text(date, 1121, 18, 9, C.dim, "right", 600);
+      text(clock, 1265, 19, 13, C.text, "right", 800);
+    }
+
+    function drawRadarGrid() {
+      ctx.save();
+      ctx.translate(.5, .5);
+      ctx.strokeStyle = C.grid;
+      ctx.lineWidth = 1;
+      for (let rr = 41; rr <= R; rr += 41) {
+        ctx.globalAlpha = rr === 164 ? .9 : .62;
+        ctx.beginPath();
+        ctx.arc(CX, CY, rr, 0, TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = .5;
+      for (let a = 0; a < TAU; a += Math.PI / 4) {
+        ctx.beginPath();
+        ctx.moveTo(CX + Math.cos(a) * 12, CY + Math.sin(a) * 12);
+        ctx.lineTo(CX + Math.cos(a) * R, CY + Math.sin(a) * R);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = .42;
+      ctx.setLineDash([2, 6]);
+      ctx.beginPath();
+      ctx.arc(CX, CY, 103, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      text("N", CX, 42, 9, C.dim, "center", 700);
+      text("090", CX + R + 17, CY + 3, 8, C.dim, "left", 600);
+      text("180", CX, CY + R + 14, 8, C.dim, "center", 600);
+      text("270", CX - R - 17, CY + 3, 8, C.dim, "right", 600);
+
+      ctx.fillStyle = C.cyan;
+      ctx.fillRect(CX - 2, CY - 2, 5, 5);
+      line(CX - 8, CY, CX + 8, CY, C.cyan, .75);
+      line(CX, CY - 8, CX, CY + 8, C.cyan, .75);
+
+      text("10 NODES · 9 ROUTES · RANGE /24", CX, 49, 9, C.soft, "center", 700);
+      text("PASSIVE FLOW MAPPING", CX, 386, 8, C.dim, "center", 700);
+    }
+
+    function drawBaseLinks(t) {
+      for (const linkDef of links) {
+        const a = nodes[linkDef.from];
+        const b = nodes[linkDef.to];
+        const mid = quadraticPoint(linkDef, .5);
+        const state = nodeState(linkDef.to, t);
+        ctx.save();
+        ctx.globalAlpha = state === "watch" ? .34 : .22;
+        ctx.strokeStyle = stateColor(state);
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.quadraticCurveTo(mid.qx, mid.qy, b.x, b.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function updateTrail(t) {
+      fx.save();
+      fx.globalCompositeOperation = "source-over";
+      fx.fillStyle = reducedMotion ? "rgba(0, 0, 0, 1)" : "rgba(0, 5, 6, .115)";
+      fx.fillRect(0, 0, W, H);
+
+      if (!reducedMotion) {
+        const angle = -Math.PI / 2 + (t % 6.4) / 6.4 * TAU;
+        fx.globalCompositeOperation = "lighter";
+        for (let i = 14; i >= 0; i -= 1) {
+          const a = angle - i * .018;
+          const alpha = (1 - i / 15) * .045;
+          fx.strokeStyle = `rgba(66, 245, 230, ${alpha})`;
+          fx.lineWidth = i < 3 ? 2 : 1;
+          fx.beginPath();
+          fx.moveTo(CX, CY);
+          fx.lineTo(CX + Math.cos(a) * R, CY + Math.sin(a) * R);
+          fx.stroke();
+        }
+
+        fx.strokeStyle = "rgba(82, 255, 155, .55)";
+        fx.lineWidth = 1;
+        fx.beginPath();
+        fx.moveTo(CX, CY);
+        fx.lineTo(CX + Math.cos(angle) * R, CY + Math.sin(angle) * R);
+        fx.stroke();
+
+        for (let i = 0; i < nodes.length; i += 1) {
+          const node = nodes[i];
+          let delta = Math.abs(((angle - node.a + Math.PI) % TAU + TAU) % TAU - Math.PI);
+          if (delta < .055) {
+            const color = stateColor(nodeState(i, t));
+            fx.strokeStyle = color;
+            fx.globalAlpha = .7;
+            fx.beginPath();
+            fx.arc(node.x, node.y, 6, 0, TAU);
+            fx.stroke();
+            fx.fillStyle = color;
+            fx.globalAlpha = .35;
+            fx.fillRect(node.x - 3, node.y - 3, 7, 7);
+          }
+        }
+
+        for (const linkDef of links) {
+          const progress = (t / linkDef.speed + linkDef.phase) % 1;
+          const state = nodeState(linkDef.to, t);
+          const color = stateColor(state);
+          for (let tailIndex = 0; tailIndex < 6; tailIndex += 1) {
+            const p = (progress - tailIndex * .018 + 1) % 1;
+            const point = quadraticPoint(linkDef, p);
+            fx.globalAlpha = (1 - tailIndex / 6) * .78;
+            fx.fillStyle = color;
+            const size = tailIndex < 2 ? 3 : 2;
+            fx.fillRect(Math.round(point.x - size / 2), Math.round(point.y - size / 2), size, size);
+          }
+        }
+      }
+      fx.restore();
+    }
+
+    function drawTrailLayer() {
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      ctx.globalAlpha = .92;
+      ctx.drawImage(trail, 0, 0);
+      ctx.restore();
+    }
+
+    function drawNodes(t) {
+      const sweepAngle = -Math.PI / 2 + (t % 6.4) / 6.4 * TAU;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const node = nodes[i];
+        const state = nodeState(i, t);
+        const color = stateColor(state);
+        const delta = Math.abs(((sweepAngle - node.a + Math.PI) % TAU + TAU) % TAU - Math.PI);
+        const pinged = !reducedMotion && delta < .12;
+        const pulse = reducedMotion ? 0 : (Math.sin(t * 4 + i * 1.7) + 1) * .5;
+
+        if (pinged) {
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = .4;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, 9 + pulse * 4, 0, TAU);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        ctx.fillStyle = C.black;
+        ctx.fillRect(node.x - 4, node.y - 4, 9, 9);
+        ctx.strokeStyle = color;
+        ctx.strokeRect(node.x - 4.5, node.y - 4.5, 9, 9);
+        ctx.fillStyle = color;
+        ctx.fillRect(node.x - 1, node.y - 1, 3, 3);
+
+        let align = "left";
+        let lx = node.x + 8;
+        if (Math.cos(node.a) < -.25) {
+          align = "right";
+          lx = node.x - 8;
+        } else if (Math.abs(Math.cos(node.a)) <= .25) {
+          align = "center";
+          lx = node.x;
+        }
+        let ly = node.y - 4;
+        if (Math.sin(node.a) > .62) ly = node.y + 16;
+        text(node.id, lx, ly, 9, color, align, 800);
+        text(node.ip, lx, ly + 10, 7, C.dim, align, 600);
+      }
+    }
+
+    function drawSparkline(values, x, y, w, h, min, max, color) {
+      line(x, y + h, x + w, y + h, C.gridDim, .9);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < HISTORY; i += 1) {
+        const index = (historyHead + i) % HISTORY;
+        const px = x + i / (HISTORY - 1) * w;
+        const py = y + h - clamp((values[index] - min) / (max - min), 0, 1) * h;
+        if (i === 0) ctx.moveTo(Math.round(px) + .5, Math.round(py) + .5);
+        else ctx.lineTo(Math.round(px) + .5, Math.round(py) + .5);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = .12;
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function meter(x, y, w, value, color) {
+      ctx.fillStyle = C.gridDim;
+      ctx.fillRect(x, y, w, 4);
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, Math.round(w * clamp(value, 0, 1)), 4);
+      ctx.fillStyle = "rgba(0,0,0,.35)";
+      for (let px = x + 7; px < x + w; px += 8) ctx.fillRect(px, y, 1, 4);
+    }
+
+    function drawLeftPanel() {
+      panel(14, 39, 218, 347, "UPLINK TELEMETRY", "WAN/01", C.cyan);
+      text("RX", 26, 78, 9, C.dim, "left", 700);
+      text(telemetry.down.toFixed(1), 26, 106, 29, C.text, "left", 800);
+      text("Mb/s", 132, 105, 10, C.cyan, "left", 700);
+      text("TX", 26, 128, 9, C.dim, "left", 700);
+      text(`${telemetry.up.toFixed(1)} Mb/s`, 51, 128, 11, C.green, "left", 700);
+      sparklineLabel("60 SEC FLOW", 26, 151);
+      drawSparkline(netHistory, 26, 158, 194, 44, 0, 100, C.cyan);
+
+      text("LATENCY", 26, 224, 8, C.dim, "left", 700);
+      text(`${telemetry.ping.toFixed(1)} ms`, 220, 224, 9, C.text, "right", 700);
+      meter(26, 231, 194, telemetry.ping / 25, C.green);
+      text("JITTER", 26, 251, 8, C.dim, "left", 700);
+      text(`${telemetry.jitter.toFixed(1)} ms`, 220, 251, 9, C.text, "right", 700);
+      meter(26, 258, 194, telemetry.jitter / 5, C.cyan);
+      text("PACKET LOSS", 26, 278, 8, C.dim, "left", 700);
+      text(`${telemetry.loss.toFixed(2)}%`, 220, 278, 9, telemetry.loss > .06 ? C.amber : C.green, "right", 700);
+      meter(26, 285, 194, telemetry.loss / .4, telemetry.loss > .06 ? C.amber : C.green);
+
+      line(26, 306, 220, 306, C.gridDim, 1);
+      statPair("PKT / SEC", Math.round(telemetry.packets).toLocaleString(), 26, 326);
+      statPair("SESSIONS", Math.round(telemetry.sessions).toString(), 26, 348);
+      statPair("EDGE TEMP", `${telemetry.temp.toFixed(1)}°C`, 26, 370);
+    }
+
+    function sparklineLabel(label, x, y) {
+      text(label, x, y, 8, C.dim, "left", 700);
+      text("LIVE", 220, y, 8, C.green, "right", 700);
+    }
+
+    function statPair(label, value, x, y) {
+      text(label, x, y, 8, C.dim, "left", 700);
+      text(value, 220, y, 9, C.text, "right", 700);
+    }
+
+    function drawRightPanel(t) {
+      panel(1001, 39, 265, 347, "NODE / SERVICE MATRIX", "10/10", C.green);
+      const serviceRows = [
+        ["EDGE", "gateway", 0],
+        ["COMPUTE", "pve cluster", 1],
+        ["STORAGE", "nas + backup", 5],
+        ["RESOLVER", "dns / dhcp", 8],
+        ["SECURE", "wireguard", 9]
+      ];
+      for (let i = 0; i < serviceRows.length; i += 1) {
+        const row = serviceRows[i];
+        const y = 78 + i * 25;
+        const state = nodeState(row[2], t);
+        const color = stateColor(state);
+        ctx.fillStyle = color;
+        ctx.fillRect(1015, y - 7, 4, 4);
+        text(row[0], 1027, y, 9, C.text, "left", 700);
+        text(row[1], 1122, y, 8, C.dim, "left", 600);
+        text(state === "watch" ? "WATCH" : "UP", 1253, y, 8, color, "right", 800);
+        line(1015, y + 8, 1253, y + 8, C.gridDim, .8);
+      }
+
+      text("EVENT TRACE", 1015, 213, 8, C.cyan, "left", 800);
+      text("LATEST", 1253, 213, 8, C.dim, "right", 700);
+      line(1015, 220, 1253, 220, C.gridDim, 1);
+      for (let i = 0; i < visibleEvents.length; i += 1) {
+        const event = eventTemplates[visibleEvents[i]];
+        const y = 238 + i * 27;
+        text(event[0], 1015, y, 8, i === 0 ? C.green : C.dim, "left", 800);
+        text(event[1], 1058, y, 8, C.soft, "left", 600);
+        text(event[2], 1253, y + 11, 7, i === 0 ? C.cyan : C.dim, "right", 600);
+      }
+
+      line(1015, 346, 1253, 346, C.gridDim, 1);
+      text("DETECTION", 1015, 365, 8, C.dim, "left", 700);
+      ctx.fillStyle = C.green;
+      ctx.fillRect(1080, 358, 58, 8);
+      ctx.fillStyle = C.gridDim;
+      ctx.fillRect(1138, 358, 27, 8);
+      text("98.7%", 1253, 365, 9, C.green, "right", 800);
+    }
+
+    function drawCenterFooter(t) {
+      const watchCount = nodes.reduce((count, _node, index) => count + (nodeState(index, t) === "watch" ? 1 : 0), 0);
+      ctx.fillStyle = "rgba(4, 16, 18, .9)";
+      ctx.fillRect(248, 361, 183, 22);
+      ctx.fillRect(806, 361, 179, 22);
+      line(248, 360, 431, 360, C.grid, 1);
+      line(806, 360, 985, 360, C.grid, 1);
+      text("THREAT INDEX", 258, 376, 8, C.dim, "left", 700);
+      text("LOW / 02", 420, 376, 9, C.green, "right", 800);
+      text("WATCH QUEUE", 816, 376, 8, C.dim, "left", 700);
+      text(String(watchCount).padStart(2, "0"), 974, 376, 9, watchCount ? C.amber : C.green, "right", 800);
+    }
+
+    function render(timeMs) {
+      requestAnimationFrame(render);
+      if (timeMs - lastFrame < FRAME_MS) return;
+      const t = timeMs / 1000;
+      const dt = Math.min(.1, t - lastTick);
+      lastTick = t;
+      lastFrame = timeMs - ((timeMs - lastFrame) % FRAME_MS);
+
+      updateTelemetry(t, dt);
+      updateTrail(t);
+      drawBackdrop();
+      drawRadarGrid();
+      drawBaseLinks(t);
+      drawTrailLayer();
+      drawNodes(t);
+      drawLeftPanel();
+      drawRightPanel(t);
+      drawCenterFooter(t);
+      drawTopClock(t);
+    }
+
+    function handleMotionChange(event) {
+      reducedMotion = event.matches;
+      fx.clearRect(0, 0, W, H);
+    }
+
+    fitStage();
+    window.addEventListener("resize", fitStage, { passive: true });
+    if (motionQuery.addEventListener) motionQuery.addEventListener("change", handleMotionChange);
+    else motionQuery.addListener(handleMotionChange);
+    requestAnimationFrame(render);
+  })();
+  </script>
+</body>
+</html>

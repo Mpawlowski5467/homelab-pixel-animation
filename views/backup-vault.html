@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>homelab // backup vault</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #020308;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: none;
+  }
+  /* A fixed 1280x400 stage is scaled uniformly, leaving clean black letterbox bars. */
+  #stage {
+    position: relative;
+    flex: 0 0 auto;
+    width: 1280px;
+    height: 400px;
+    overflow: hidden;
+    transform-origin: center center;
+    background: #05060b;
+  }
+  #vault-display {
+    display: block;
+    width: 1280px;
+    height: 400px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  .scanlines, .vignette, .glass {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .scanlines {
+    opacity: .3;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 3px,
+      rgba(0, 0, 0, .3) 3px,
+      rgba(0, 0, 0, .3) 4px
+    );
+  }
+  .glass {
+    background: linear-gradient(110deg, rgba(78, 231, 255, .025), transparent 28%, transparent 72%, rgba(255, 79, 200, .02));
+    mix-blend-mode: screen;
+  }
+  .vignette {
+    background: radial-gradient(ellipse at center, transparent 54%, rgba(0, 0, 0, .2) 78%, rgba(0, 0, 0, .62) 100%);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glass { display: none; }
+  }
+</style>
+</head>
+<body>
+<main id="stage" role="img" aria-label="Animated backup vault dashboard showing four homelab systems passing data through compression, deduplication and parity stages into an immutable storage vault.">
+  <canvas id="vault-display" width="640" height="200"></canvas>
+  <div class="glass"></div>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+</main>
+
+<script>
+"use strict";
+(function () {
+  var W = 640, H = 200;
+  var stage = document.getElementById("stage");
+  var canvas = document.getElementById("vault-display");
+  var ctx = canvas.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+
+  var C = {
+    bg:       "#05060b",
+    bg2:      "#070a12",
+    panel:    "#0a0e18",
+    panelHi:  "#0e1421",
+    line:     "#202a3d",
+    lineLo:   "#121a29",
+    grid:     "#0d1421",
+    ink:      "#d8eef7",
+    text:     "#9fb2c8",
+    dim:      "#52647c",
+    cyan:     "#4de8ff",
+    cyanMid:  "#228fa1",
+    cyanLo:   "#123c4b",
+    magenta:  "#ff4fc8",
+    magMid:   "#a02d7e",
+    magLo:    "#49163c",
+    amber:    "#ffb84a",
+    amberMid: "#a66d27",
+    amberLo:  "#4b3219",
+    green:    "#72f2a4",
+    greenLo:  "#24573d",
+    red:      "#ff6c73"
+  };
+
+  function fitStage() {
+    var scale = Math.min(window.innerWidth / 1280, window.innerHeight / 400);
+    stage.style.transform = "scale(" + scale + ")";
+  }
+  window.addEventListener("resize", fitStage, { passive: true });
+  fitStage();
+
+  /* Compact 3x5 bitmap type keeps every label aligned to the display's pixel grid. */
+  var FONT = {
+    " ":[0,0,0,0,0], "A":[2,5,7,5,5], "B":[6,5,6,5,6],
+    "C":[3,4,4,4,3], "D":[6,5,5,5,6], "E":[7,4,6,4,7],
+    "F":[7,4,6,4,4], "G":[3,4,5,5,3], "H":[5,5,7,5,5],
+    "I":[7,2,2,2,7], "J":[1,1,1,5,2], "K":[5,5,6,5,5],
+    "L":[4,4,4,4,7], "M":[5,7,7,5,5], "N":[5,7,7,7,5],
+    "O":[2,5,5,5,2], "P":[6,5,6,4,4], "Q":[2,5,5,7,3],
+    "R":[6,5,6,5,5], "S":[3,4,2,1,6], "T":[7,2,2,2,2],
+    "U":[5,5,5,5,7], "V":[5,5,5,5,2], "W":[5,5,7,7,5],
+    "X":[5,5,2,5,5], "Y":[5,5,2,2,2], "Z":[7,1,2,4,7],
+    "0":[7,5,5,5,7], "1":[2,6,2,2,7], "2":[6,1,2,4,7],
+    "3":[6,1,2,1,6], "4":[5,5,7,1,1], "5":[7,4,6,1,6],
+    "6":[3,4,7,5,7], "7":[7,1,2,2,2], "8":[7,5,7,5,7],
+    "9":[7,5,7,1,6], ":":[0,2,0,2,0], ".":[0,0,0,0,2],
+    "/":[1,1,2,4,4], "-":[0,0,7,0,0], "_":[0,0,0,0,7],
+    "%":[5,1,2,4,5], "+":[0,2,7,2,0], "#":[5,7,5,7,5],
+    "[ ":[6,4,4,4,6], "[":[6,4,4,4,6], "]":[3,1,1,1,3],
+    "(":[2,4,4,4,2], ")":[2,1,1,1,2], ">":[4,2,1,2,4],
+    "<":[1,2,4,2,1], "=":[0,7,0,7,0], "|":[2,2,2,2,2],
+    "?":[6,1,2,0,2], "'":[2,2,0,0,0]
+  };
+
+  function textWidth(value, scale) {
+    scale = scale || 1;
+    return Math.max(0, value.length * 4 * scale - scale);
+  }
+  function ptext(value, x, y, color, scale, align) {
+    value = String(value).toUpperCase();
+    scale = scale || 1;
+    if (align === "right") x -= textWidth(value, scale);
+    if (align === "center") x -= Math.floor(textWidth(value, scale) / 2);
+    ctx.fillStyle = color;
+    for (var i = 0; i < value.length; i++) {
+      var rows = FONT[value.charAt(i)] || FONT["?"];
+      for (var row = 0; row < 5; row++) {
+        for (var col = 0; col < 3; col++) {
+          if (rows[row] & (4 >> col)) {
+            ctx.fillRect(x + (i * 4 + col) * scale, y + row * scale, scale, scale);
+          }
+        }
+      }
+    }
+  }
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function line(x0, y0, x1, y1, color) {
+    x0 = Math.round(x0); y0 = Math.round(y0);
+    x1 = Math.round(x1); y1 = Math.round(y1);
+    var dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    var dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    var err = dx + dy;
+    ctx.fillStyle = color;
+    while (true) {
+      ctx.fillRect(x0, y0, 1, 1);
+      if (x0 === x1 && y0 === y1) break;
+      var e2 = err * 2;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  function panel(x, y, w, h, accent) {
+    ctx.fillStyle = C.panel;
+    ctx.fillRect(x + 1, y, w - 2, h);
+    ctx.fillRect(x, y + 1, w, h - 2);
+    ctx.fillStyle = C.line;
+    ctx.fillRect(x + 2, y, w - 4, 1);
+    ctx.fillRect(x + 2, y + h - 1, w - 4, 1);
+    ctx.fillRect(x, y + 2, 1, h - 4);
+    ctx.fillRect(x + w - 1, y + 2, 1, h - 4);
+    ctx.fillStyle = accent || C.line;
+    ctx.fillRect(x + 4, y, Math.max(1, w - 8), 1);
+    ctx.fillRect(x, y + 1, 2, 1);
+    ctx.fillRect(x + w - 2, y + 1, 2, 1);
+  }
+
+  var seed = 0x7b42a91;
+  function random() {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  }
+
+  var sources = [
+    { name: "PVE-01",  sub: "42 VM",    color: C.cyan,    dim: C.cyanLo, y: 31, load: .76 },
+    { name: "NAS-01",  sub: "ZFS 18T",  color: C.magenta, dim: C.magLo,  y: 58, load: .53 },
+    { name: "DB-CORE", sub: "WAL SYNC", color: C.amber,   dim: C.amberLo,y: 85, load: .66 },
+    { name: "GIT-01",  sub: "86 REPOS", color: C.cyan,    dim: C.cyanLo, y:112, load: .39 }
+  ];
+
+  function makeRoute(source) {
+    var cy = source.y + 11;
+    var points = [
+      { x: 117, y: cy }, { x: 128, y: cy }, { x: 128, y: 87 },
+      { x: 143, y: 87 }, { x: 188, y: 87 }, { x: 204, y: 87 },
+      { x: 249, y: 87 }, { x: 265, y: 87 }, { x: 310, y: 87 },
+      { x: 328, y: 87 }, { x: 350, y: 87 }
+    ];
+    var lengths = [], total = 0;
+    for (var i = 1; i < points.length; i++) {
+      var d = Math.abs(points[i].x - points[i - 1].x) + Math.abs(points[i].y - points[i - 1].y);
+      lengths.push(d); total += d;
+    }
+    return { points: points, lengths: lengths, total: total };
+  }
+  var routes = sources.map(makeRoute);
+
+  function routePoint(route, progress) {
+    var distance = clamp(progress, 0, 1) * route.total;
+    for (var i = 0; i < route.lengths.length; i++) {
+      var seg = route.lengths[i];
+      if (distance <= seg) {
+        var a = route.points[i], b = route.points[i + 1];
+        var t = seg ? distance / seg : 0;
+        return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
+      }
+      distance -= seg;
+    }
+    return route.points[route.points.length - 1];
+  }
+
+  /* Fixed pool: blocks are reused forever, so the kiosk never accumulates objects. */
+  var blocks = [];
+  for (var bi = 0; bi < 22; bi++) {
+    blocks.push({ active: false, source: 0, p: 0, speed: .13 });
+  }
+  var nextSource = 0, spawnClock = 0;
+  function spawnBlock() {
+    for (var i = 0; i < blocks.length; i++) {
+      if (!blocks[i].active) {
+        blocks[i].active = true;
+        blocks[i].source = nextSource;
+        blocks[i].p = 0;
+        blocks[i].speed = .115 + random() * .035;
+        nextSource = (nextSource + 1 + (random() > .82 ? 1 : 0)) % sources.length;
+        return;
+      }
+    }
+  }
+
+  var metrics = {
+    ingest: 246, ingestTarget: 246,
+    write: 164, writeTarget: 164,
+    saved: 67.2, savedTarget: 67.2,
+    ratio: 2.31, ratioTarget: 2.31,
+    queue: 11.8, queueTarget: 11.8,
+    free: 47.6, freeTarget: 47.6,
+    temp: 31, tempTarget: 31
+  };
+  var historyIn = new Float32Array(58);
+  var historyWrite = new Float32Array(58);
+  for (var hi = 0; hi < historyIn.length; hi++) {
+    historyIn[hi] = metrics.ingest + Math.sin(hi * .34) * 19;
+    historyWrite[hi] = metrics.write + Math.sin(hi * .34 + .8) * 15;
+  }
+  var historyHead = 0, historyClock = 0, driftClock = 0;
+  var snapshot = 8426, snapshotProgress = .72, completionGlow = 0;
+
+  function newMetricTargets() {
+    metrics.ingestTarget = clamp(metrics.ingestTarget + (random() - .48) * 60, 145, 390);
+    metrics.writeTarget = clamp(metrics.writeTarget + (random() - .5) * 42, 90, 285);
+    metrics.savedTarget = clamp(metrics.savedTarget + (random() - .5) * 2.4, 61, 74);
+    metrics.ratioTarget = clamp(metrics.ratioTarget + (random() - .5) * .16, 1.82, 2.78);
+    metrics.queueTarget = clamp(metrics.queueTarget + (random() - .53) * 3.8, 3.5, 24);
+    metrics.freeTarget = clamp(metrics.freeTarget + (random() - .52) * .12, 46.8, 48.2);
+    metrics.tempTarget = clamp(metrics.tempTarget + (random() - .5) * 2, 29, 35);
+    for (var i = 0; i < sources.length; i++) {
+      sources[i].load = clamp(sources[i].load + (random() - .5) * .22, .22, .91);
+    }
+  }
+
+  function approachMetrics(dt) {
+    var k = Math.min(1, dt * .72);
+    metrics.ingest += (metrics.ingestTarget - metrics.ingest) * k;
+    metrics.write += (metrics.writeTarget - metrics.write) * k;
+    metrics.saved += (metrics.savedTarget - metrics.saved) * k;
+    metrics.ratio += (metrics.ratioTarget - metrics.ratio) * k;
+    metrics.queue += (metrics.queueTarget - metrics.queue) * k;
+    metrics.free += (metrics.freeTarget - metrics.free) * k;
+    metrics.temp += (metrics.tempTarget - metrics.temp) * k;
+  }
+
+  var motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var reducedMotion = motionQuery.matches;
+  function motionChanged(event) {
+    reducedMotion = event.matches;
+    if (reducedMotion) {
+      for (var i = 0; i < blocks.length; i++) blocks[i].active = false;
+      spawnClock = 0;
+    }
+  }
+  if (motionQuery.addEventListener) motionQuery.addEventListener("change", motionChanged);
+  else if (motionQuery.addListener) motionQuery.addListener(motionChanged);
+
+  function update(dt) {
+    driftClock += dt;
+    if (driftClock >= 2.25) {
+      driftClock -= 2.25;
+      newMetricTargets();
+    }
+    approachMetrics(dt);
+
+    historyClock += dt;
+    if (historyClock >= .25) {
+      historyClock -= .25;
+      historyHead = (historyHead + 1) % historyIn.length;
+      historyIn[historyHead] = metrics.ingest;
+      historyWrite[historyHead] = metrics.write;
+    }
+
+    /* Snapshot progress is operational state, retained in reduced-motion mode. */
+    snapshotProgress += dt / 38;
+    if (snapshotProgress >= 1) {
+      snapshotProgress -= 1;
+      snapshot += 1;
+      completionGlow = reducedMotion ? 0 : 1;
+    }
+    completionGlow = Math.max(0, completionGlow - dt * .75);
+
+    if (!reducedMotion) {
+      spawnClock += dt;
+      if (spawnClock >= .47) {
+        spawnClock -= .47;
+        spawnBlock();
+      }
+      for (var i = 0; i < blocks.length; i++) {
+        if (!blocks[i].active) continue;
+        blocks[i].p += blocks[i].speed * dt;
+        if (blocks[i].p >= 1) blocks[i].active = false;
+      }
+    }
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = C.bg2;
+    ctx.fillRect(0, 23, W, 125);
+    for (var y = 30; y < 148; y += 12) {
+      for (var x = 4 + ((y / 12) % 2) * 6; x < W; x += 12) {
+        ctx.fillStyle = C.grid;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    ctx.fillStyle = C.cyanLo;
+    ctx.fillRect(0, 23, 2, 125);
+    ctx.fillStyle = C.magLo;
+    ctx.fillRect(638, 23, 2, 125);
+  }
+
+  function drawHeader(now) {
+    ctx.fillStyle = C.panel;
+    ctx.fillRect(0, 0, W, 22);
+    ctx.fillStyle = C.line;
+    ctx.fillRect(0, 21, W, 1);
+    ctx.fillStyle = C.cyan;
+    ctx.fillRect(0, 0, 82, 2);
+    ctx.fillStyle = C.magenta;
+    ctx.fillRect(82, 0, 54, 2);
+    ctx.fillStyle = C.amber;
+    ctx.fillRect(136, 0, 96, 2);
+
+    ptext("BACKUP VAULT", 10, 6, C.ink, 2);
+    ptext("// COLDSTORE-01", 112, 9, C.amber, 1);
+
+    ctx.fillStyle = C.greenLo;
+    ctx.fillRect(282, 6, 6, 6);
+    ctx.fillStyle = C.green;
+    ctx.fillRect(284, 8, 2, 2);
+    ptext(reducedMotion ? "ARCHIVE ONLINE / QUIET MODE" : "ARCHIVE ONLINE / REPLICATION NOMINAL", 294, 7, C.text, 1);
+    ptext("SNAP #" + String(snapshot).padStart(4, "0"), 294, 14, C.dim, 1);
+
+    var date = new Date(now);
+    var hh = String(date.getHours()).padStart(2, "0");
+    var mm = String(date.getMinutes()).padStart(2, "0");
+    var ss = String(date.getSeconds()).padStart(2, "0");
+    ptext(hh + ":" + mm + ":" + ss, 628, 6, C.ink, 2, "right");
+    ptext("LOCAL / AES-256", 628, 17, C.dim, 1, "right");
+  }
+
+  function drawServerIcon(x, y, source, index, t) {
+    ctx.fillStyle = source.dim;
+    ctx.fillRect(x, y, 13, 13);
+    ctx.fillStyle = C.panelHi;
+    ctx.fillRect(x + 1, y + 1, 11, 11);
+    for (var row = 0; row < 3; row++) {
+      ctx.fillStyle = source.dim;
+      ctx.fillRect(x + 2, y + 2 + row * 3, 9, 2);
+      var active = reducedMotion || ((Math.floor(t * 2.2) + row + index * 2) % 7 !== 0);
+      ctx.fillStyle = active ? source.color : source.dim;
+      ctx.fillRect(x + 3, y + 2 + row * 3, 1, 1);
+    }
+  }
+
+  function drawSources(t) {
+    ptext("SOURCE SYSTEMS", 11, 25, C.dim, 1);
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i], y = s.y;
+      panel(10, y, 108, 23, s.color);
+      drawServerIcon(15, y + 5, s, i, t);
+      ptext(s.name, 33, y + 5, C.ink, 1);
+      ptext(s.sub, 33, y + 14, C.dim, 1);
+      ptext(String(Math.round(s.load * 100)) + "%", 108, y + 5, s.color, 1, "right");
+      ctx.fillStyle = C.lineLo;
+      ctx.fillRect(78, y + 15, 30, 3);
+      ctx.fillStyle = s.dim;
+      ctx.fillRect(79, y + 16, 28, 1);
+      ctx.fillStyle = s.color;
+      ctx.fillRect(79, y + 16, Math.max(1, Math.round(28 * s.load)), 1);
+    }
+  }
+
+  function arrow(x, y, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y - 1, 2, 3);
+    ctx.fillRect(x + 2, y, 1, 1);
+  }
+
+  function drawPipelineRails() {
+    ctx.fillStyle = C.line;
+    ctx.fillRect(127, 41, 2, 83);
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i], cy = s.y + 11;
+      ctx.fillStyle = s.dim;
+      ctx.fillRect(118, cy, 10, 1);
+      ctx.fillRect(127, Math.min(cy, 87), 1, Math.abs(cy - 87) + 1);
+    }
+    ctx.fillStyle = C.cyanLo;
+    ctx.fillRect(128, 86, 222, 3);
+    ctx.fillStyle = C.cyanMid;
+    ctx.fillRect(128, 87, 222, 1);
+    arrow(196, 87, C.cyan);
+    arrow(257, 87, C.magenta);
+    arrow(318, 87, C.amber);
+    ptext("INGEST BUS", 126, 131, C.dim, 1);
+  }
+
+  function stageActivity(x0, x1) {
+    var count = 0;
+    for (var i = 0; i < blocks.length; i++) {
+      if (!blocks[i].active) continue;
+      var point = routePoint(routes[blocks[i].source], blocks[i].p);
+      if (point.x >= x0 && point.x <= x1) count++;
+    }
+    return count;
+  }
+
+  function drawCompression(x, y, active) {
+    panel(x, y, 45, 48, active ? C.cyan : C.cyanMid);
+    ptext("COMP", x + 22, y + 5, active ? C.cyan : C.text, 1, "center");
+    ctx.fillStyle = C.cyanLo;
+    ctx.fillRect(x + 10, y + 16, 25, 18);
+    var widths = [21, 17, 13, 9];
+    for (var i = 0; i < widths.length; i++) {
+      ctx.fillStyle = i === 3 && active ? C.cyan : C.cyanMid;
+      ctx.fillRect(x + 12 + Math.floor((21 - widths[i]) / 2), y + 18 + i * 4, widths[i], 2);
+    }
+    ptext("2.31X", x + 22, y + 39, C.dim, 1, "center");
+  }
+
+  function drawDedupe(x, y, active) {
+    panel(x, y, 45, 48, active ? C.magenta : C.magMid);
+    ptext("DEDUPE", x + 22, y + 5, active ? C.magenta : C.text, 1, "center");
+    ctx.fillStyle = C.magLo;
+    ctx.fillRect(x + 9, y + 16, 27, 18);
+    ctx.fillStyle = C.magMid;
+    ctx.fillRect(x + 12, y + 19, 7, 7);
+    ctx.fillRect(x + 12, y + 27, 7, 4);
+    ctx.fillStyle = active ? C.magenta : C.magMid;
+    ctx.fillRect(x + 25, y + 22, 8, 7);
+    line(x + 20, y + 22, x + 24, y + 25, C.magMid);
+    line(x + 20, y + 28, x + 24, y + 26, C.magMid);
+    ptext("67.2%", x + 22, y + 39, C.dim, 1, "center");
+  }
+
+  function drawParity(x, y, active) {
+    panel(x, y, 45, 48, active ? C.amber : C.amberMid);
+    ptext("PARITY", x + 22, y + 5, active ? C.amber : C.text, 1, "center");
+    ctx.fillStyle = C.amberLo;
+    ctx.fillRect(x + 9, y + 16, 27, 18);
+    for (var row = 0; row < 3; row++) {
+      for (var col = 0; col < 4; col++) {
+        var parity = (row + col) % 3 === 0;
+        ctx.fillStyle = parity && active ? C.amber : (parity ? C.amberMid : C.line);
+        ctx.fillRect(x + 12 + col * 6, y + 19 + row * 5, 3, 3);
+      }
+    }
+    ptext("Z2 / OK", x + 22, y + 39, C.dim, 1, "center");
+  }
+
+  function drawStages() {
+    drawCompression(143, 63, reducedMotion || stageActivity(143, 188) > 0);
+    drawDedupe(204, 63, reducedMotion || stageActivity(204, 249) > 0);
+    drawParity(265, 63, reducedMotion || stageActivity(265, 310) > 0);
+    ptext("01", 165, 54, C.cyanMid, 1, "center");
+    ptext("02", 226, 54, C.magMid, 1, "center");
+    ptext("03", 287, 54, C.amberMid, 1, "center");
+  }
+
+  function drawOctagon(cx, cy, radius, fill, stroke) {
+    var cut = Math.floor(radius * .28);
+    var left = cx - radius, right = cx + radius;
+    var top = cy - radius, bottom = cy + radius;
+    ctx.fillStyle = fill;
+    ctx.fillRect(left + cut, top, radius * 2 - cut * 2 + 1, radius * 2 + 1);
+    ctx.fillRect(left, top + cut, radius * 2 + 1, radius * 2 - cut * 2 + 1);
+    ctx.fillRect(left + Math.floor(cut / 2), top + Math.floor(cut / 2), radius * 2 - cut + 1, radius * 2 - cut + 1);
+    line(left + cut, top, right - cut, top, stroke);
+    line(right - cut, top, right, top + cut, stroke);
+    line(right, top + cut, right, bottom - cut, stroke);
+    line(right, bottom - cut, right - cut, bottom, stroke);
+    line(right - cut, bottom, left + cut, bottom, stroke);
+    line(left + cut, bottom, left, bottom - cut, stroke);
+    line(left, bottom - cut, left, top + cut, stroke);
+    line(left, top + cut, left + cut, top, stroke);
+  }
+
+  function drawVault(t) {
+    panel(327, 30, 154, 113, completionGlow > 0 ? C.amber : C.amberMid);
+    ptext("IMMUTABLE VAULT", 334, 35, C.amber, 1);
+    ptext("AIR-GAP READY", 472, 35, C.green, 1, "right");
+
+    var cx = 377, cy = 88;
+    drawOctagon(cx, cy, 37, C.panelHi, C.amberLo);
+    drawOctagon(cx, cy, 30, C.bg2, completionGlow > .25 ? C.amber : C.amberMid);
+    drawOctagon(cx, cy, 20, C.panelHi, C.line);
+
+    var step = reducedMotion ? 0 : Math.floor(t / 1.15) % 8;
+    var dirs = [[0,-24],[17,-17],[24,0],[17,17],[0,24],[-17,17],[-24,0],[-17,-17]];
+    for (var i = 0; i < dirs.length; i++) {
+      var bright = i === step;
+      line(cx, cy, cx + dirs[i][0], cy + dirs[i][1], bright ? C.amber : C.amberLo);
+    }
+    ctx.fillStyle = C.amberMid;
+    ctx.fillRect(cx - 4, cy - 4, 9, 9);
+    ctx.fillStyle = C.amber;
+    ctx.fillRect(cx - 1, cy - 1, 3, 3);
+    ctx.fillStyle = C.ink;
+    ctx.fillRect(cx, cy, 1, 1);
+
+    ctx.fillStyle = C.line;
+    ctx.fillRect(420, 49, 50, 77);
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(421, 50, 48, 75);
+    ptext("ARRAY 12", 445, 53, C.dim, 1, "center");
+    for (var d = 0; d < 8; d++) {
+      var dx = 425 + (d % 2) * 21;
+      var dy = 61 + Math.floor(d / 2) * 14;
+      ctx.fillStyle = C.line;
+      ctx.fillRect(dx, dy, 18, 11);
+      ctx.fillStyle = C.panelHi;
+      ctx.fillRect(dx + 1, dy + 1, 16, 9);
+      ctx.fillStyle = C.dim;
+      ctx.fillRect(dx + 4, dy + 4, 9, 1);
+      var ledOn = reducedMotion || ((Math.floor(t * 1.7) + d * 3) % 11 < 7);
+      ctx.fillStyle = ledOn ? (d % 3 === 1 ? C.cyan : C.green) : C.greenLo;
+      ctx.fillRect(dx + 14, dy + 7, 2, 2);
+    }
+    ptext("12/12 HEALTHY", 445, 119, C.green, 1, "center");
+    ptext("WORM LOCK / AES256 / Z2", 404, 133, C.dim, 1, "center");
+  }
+
+  function blockColor(x, source) {
+    if (x < 143) return source.color;
+    if (x < 204) return C.cyan;
+    if (x < 265) return C.magenta;
+    return C.amber;
+  }
+
+  function drawOneBlock(route, source, progress, alpha) {
+    var p = routePoint(route, progress);
+    var color = blockColor(p.x, source);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    var w = p.x < 188 ? 5 : (p.x < 249 ? 4 : 3);
+    var h = p.x < 188 ? 3 : 2;
+    ctx.fillRect(Math.round(p.x) - w, Math.round(p.y) - Math.floor(h / 2), w, h);
+    if (p.x >= 310) {
+      ctx.fillRect(Math.round(p.x) - 1, Math.round(p.y) - 3, 1, 1);
+      ctx.fillRect(Math.round(p.x) - 1, Math.round(p.y) + 2, 1, 1);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBlocks() {
+    if (reducedMotion) {
+      /* Parked indicators communicate flow without traveling across the screen. */
+      var parked = [
+        { x: 197, c: C.cyan }, { x: 258, c: C.magenta }, { x: 319, c: C.amber }
+      ];
+      for (var pi = 0; pi < parked.length; pi++) {
+        ctx.fillStyle = parked[pi].c;
+        ctx.fillRect(parked[pi].x - 2, 86, 3, 2);
+      }
+      return;
+    }
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      if (!b.active) continue;
+      var route = routes[b.source], source = sources[b.source];
+      drawOneBlock(route, source, Math.max(0, b.p - .026), .13);
+      drawOneBlock(route, source, Math.max(0, b.p - .013), .32);
+      drawOneBlock(route, source, b.p, 1);
+    }
+  }
+
+  function metricRow(label, value, y, color) {
+    ptext(label, 498, y, C.dim, 1);
+    ptext(value, 623, y, color || C.ink, 1, "right");
+  }
+
+  function drawHistory() {
+    var x = 498, y = 106, w = 125, h = 27;
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = C.grid;
+    for (var gx = x; gx < x + w; gx += 10) ctx.fillRect(gx, y, 1, h);
+    for (var gy = y + 5; gy < y + h; gy += 7) ctx.fillRect(x, gy, w, 1);
+    var prevIX = x, prevIY = y + h - 2;
+    var prevWX = x, prevWY = y + h - 2;
+    for (var i = 0; i < historyIn.length; i++) {
+      var index = (historyHead + 1 + i) % historyIn.length;
+      var px = x + Math.floor(i * (w - 1) / (historyIn.length - 1));
+      var iy = y + h - 2 - Math.round(clamp(historyIn[index] / 420, 0, 1) * (h - 4));
+      var wy = y + h - 2 - Math.round(clamp(historyWrite[index] / 320, 0, 1) * (h - 4));
+      if (i) {
+        line(prevIX, prevIY, px, iy, C.cyan);
+        line(prevWX, prevWY, px, wy, C.magenta);
+      }
+      prevIX = prevWX = px; prevIY = iy; prevWY = wy;
+    }
+  }
+
+  function drawMetrics() {
+    panel(491, 30, 139, 113, C.cyanMid);
+    ptext("LIVE TRANSFER", 498, 35, C.cyan, 1);
+    ptext("IN", 603, 35, C.cyan, 1);
+    ptext("WR", 615, 35, C.magenta, 1);
+    metricRow("INGEST", Math.round(metrics.ingest) + "MB/S", 47, C.cyan);
+    metricRow("WRITE", Math.round(metrics.write) + "MB/S", 56, C.magenta);
+    metricRow("SAVED", metrics.saved.toFixed(1) + "%", 65, C.amber);
+    metricRow("RATIO", metrics.ratio.toFixed(2) + "X", 74, C.ink);
+    metricRow("QUEUE", metrics.queue.toFixed(1) + "GB", 83, C.ink);
+    metricRow("FREE", metrics.free.toFixed(1) + "TB", 92, C.green);
+    drawHistory();
+    ptext("60S THROUGHPUT", 498, 136, C.dim, 1);
+    ptext(Math.round(metrics.temp) + "C", 623, 136, C.green, 1, "right");
+  }
+
+  function drawTimeline() {
+    panel(10, 149, 620, 43, C.magMid);
+    ptext("SNAPSHOT CHAIN", 18, 155, C.magenta, 1);
+    ptext("IMMUTABLE / 30D", 18, 181, C.dim, 1);
+
+    var startX = 118, step = 49, y = 165;
+    ctx.fillStyle = C.line;
+    ctx.fillRect(startX, y + 4, step * 6, 1);
+    for (var i = 0; i < 7; i++) {
+      var nx = startX + i * step;
+      var current = i === 6;
+      ctx.fillStyle = current ? C.amberLo : C.magLo;
+      ctx.fillRect(nx - 4, y, 9, 9);
+      ctx.fillStyle = current ? C.amber : C.magenta;
+      ctx.fillRect(nx - 2, y + 2, 5, 5);
+      if (!current) {
+        ctx.fillStyle = C.panel;
+        ctx.fillRect(nx - 1, y + 3, 1, 2);
+        ctx.fillRect(nx, y + 4, 2, 1);
+      }
+      var id = snapshot - (6 - i);
+      ptext(String(id).slice(-4), nx, 177, current ? C.amber : C.dim, 1, "center");
+    }
+
+    var px = 432, py = 158, pw = 188;
+    ptext("CURRENT #" + String(snapshot).padStart(4, "0"), px, py, C.ink, 1);
+    ptext(Math.floor(snapshotProgress * 100) + "%", px + pw, py, C.amber, 1, "right");
+    ctx.fillStyle = C.lineLo;
+    ctx.fillRect(px, py + 9, pw, 7);
+    ctx.fillStyle = C.amberLo;
+    ctx.fillRect(px + 1, py + 10, pw - 2, 5);
+    ctx.fillStyle = C.amber;
+    ctx.fillRect(px + 1, py + 10, Math.floor((pw - 2) * snapshotProgress), 5);
+    ctx.fillStyle = C.ink;
+    var cap = Math.floor((pw - 2) * snapshotProgress);
+    if (cap > 2) ctx.fillRect(px + cap - 1, py + 10, 1, 5);
+    ptext("VERIFY + SEAL", px, py + 20, C.dim, 1);
+    ptext("ETA " + Math.ceil((1 - snapshotProgress) * 38) + "S", px + pw, py + 20, C.green, 1, "right");
+  }
+
+  function render(timeSeconds) {
+    drawBackground();
+    drawHeader(Date.now());
+    drawSources(timeSeconds);
+    drawPipelineRails();
+    drawStages();
+    drawVault(timeSeconds);
+    drawMetrics();
+    drawBlocks();
+    drawTimeline();
+  }
+
+  var last = performance.now();
+  var lastDraw = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    var dt = Math.min(.05, Math.max(0, (now - last) / 1000));
+    last = now;
+    if (document.hidden) return;
+    update(dt);
+    /* 30fps is ample for pixel blocks and keeps kiosk CPU/GPU demand modest. */
+    if (now - lastDraw >= 33) {
+      lastDraw = now;
+      render(now / 1000);
+    }
+  }
+  document.addEventListener("visibilitychange", function () { last = performance.now(); });
+  render(0);
+  requestAnimationFrame(frame);
+}());
+</script>
+</body>
+</html>

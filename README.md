@@ -41,13 +41,11 @@ by a simulator that loops **healthy → degrade → critical → recover**.
 
 ## Themed views — `views/`
 
-Five extra **single-file, self-contained** displays — same 1280×400 strip, each its own little
+Seven extra **single-file, self-contained** displays — same 1280×400 strip, each its own little
 world, all data mocked and drifting forever (~7/10 motion). Browse them with the picker at
 **`views/index.html`**, or point the kiosk straight at one. Unlike the dashboard, these **don't** use
 the `src/` engine — each is one standalone file; the only external link is Google Fonts (with
 monospace fallbacks so they still read offline).
-
-![The view picker / gallery](screenshots/gallery.png)
 
 ### 🟢 Agents on Duty — `views/agents.html`
 
@@ -60,13 +58,11 @@ occasional amber `WARN`.
 
 ### 🟢 Datacenter Floor — `views/datacenter.html`
 
-A top-down companion to *Agents*. **Five agents autonomously patrol** the central aisle between
-**seven colour-coded equipment sectors** (compute · storage · network · monitoring · power · cooling
-· backup), fanning out so no two crowd the same zone, then reporting `NAME @ SECTOR` + a status line
-on arrival. Detailed server cabinets with blinking LEDs, glowing-visor sprites, two-line bubbles —
-the highest-fidelity view in the set.
-
-![Datacenter Floor](screenshots/datacenter.png)
+A top-down companion to *Agents*. **Five agents autonomously patrol** four service aisles wrapped
+around **three dense rows of server racks**, visibly moving left, right, up, and down through aligned
+cross-corridors. They fan out across twelve labelled rack banks and report live telemetry in compact
+aisle sidecars. Forty-eight blinking cabinet faces, glowing-visor sprites, and deadlock-safe routing
+make this the highest-fidelity view in the set.
 
 ### 🟢 CRT Terminal — `views/terminal.html`
 
@@ -84,6 +80,18 @@ tower** — blinking drive bays, a pulsing power LED, a beating pixel heart, and
 counter, redrawn at ~7fps for that low-framerate retro feel.
 
 ![Pixel / Amber](screenshots/pixel-amber.png)
+
+### 🔵 Network Radar — `views/network-radar.html`
+
+A green/cyan **network scope** centered on a sweeping radar beam. Labeled homelab blips brighten as
+the sweep finds them, glowing **packet trails** travel between active links, and compact telemetry
+keeps throughput, latency, peers, and packet health visible at a glance.
+
+### 🟠 Backup Vault — `views/backup-vault.html`
+
+An amber/magenta/cyan **backup pipeline** in constant motion. Data blocks stream through visual
+**dedupe, compression, and parity** stages before landing in a fortified vault, while snapshot
+history and job telemetry make each backup cycle feel tangible.
 
 ### 🔵 Hacker TUI — `views/tui.html`
 
@@ -107,9 +115,9 @@ The themed views also open standalone — e.g. double-click `views/datacenter.ht
 
 ## Terminal views — `terminal/`
 
-Every display also exists as a **terminal (ANSI) version** — same looks, same mocked drifting
-data, rendered with truecolor escapes, block characters, and half-block pixel art instead of a
-browser. Zero dependencies; all you need is Node ≥ 18 and a truecolor-capable terminal
+The dashboard and five original themes also exist as **terminal (ANSI) versions** — same looks,
+same mocked drifting data, rendered with truecolor escapes, block characters, and half-block pixel
+art instead of a browser. Zero dependencies; all you need is Node ≥ 18 and a truecolor-capable terminal
 (iTerm2, Terminal.app, kitty, alacritty, Windows Terminal…).
 
 ```sh
@@ -170,9 +178,13 @@ server-side:
 
 - The **dashboard** renders to a tiny **320×100 backing buffer** upscaled 4× nearest-neighbour → crisp chunky pixels, with a small bitmap-ish font.
 - **`agents`** is full-canvas pixel art: a low-res **426×133 buffer**, a hand-rolled bitmap font, and `image-rendering: pixelated` for that authentic CRT chunk.
-- **`datacenter`** is the high-fidelity one: a **hi-DPI canvas** drawing crisp web-font text *and* chunky pixel sprites, with detailed cabinets and two-line speech bubbles.
+- **`datacenter`** is the high-fidelity one: a **hi-DPI canvas** drawing crisp web-font text *and* chunky pixel sprites, with three dense rack rows, compact status sidecars, and multi-aisle patrol routing.
 - **`terminal`** is DOM + CSS (crisp phosphor text) with the scanlines / flicker / rolling band as CSS overlays.
 - **`pixel-amber`** mixes DOM text (Silkscreen) with a small **pixelated canvas** for the animated server tower & beating heart.
+- **`network-radar`** uses a pixelated canvas for the rotating sweep, glowing contacts, packet
+  trails, and dense live telemetry.
+- **`backup-vault`** uses a pixelated canvas to animate data blocks through its processing stages,
+  snapshot archive, and illuminated vault.
 - **`tui`** is DOM + hi-DPI canvases (JetBrains Mono) for a crisp, modern terminal UI.
 
 All of it is plain HTML5 Canvas + vanilla JS — no frameworks, no build, no dependencies.
@@ -199,7 +211,8 @@ views/                                       standalone single-file displays (no
   agents.html      datacenter.html           green-phosphor CRT pixel-agent scenes
   terminal.html                              green-phosphor CRT terminal
   pixel-amber.html tui.html                  8-bit amber + btop-style TUI
-terminal/                                    ANSI terminal versions of every view (Node, zero deps)
+  network-radar.html backup-vault.html       network scope + animated backup pipeline
+terminal/                                    ANSI versions of the six original views (Node, zero deps)
   index.js                                   interactive picker / launcher
   dashboard.js                               Mission Control (the main dashboard)
   agents.js datacenter.js terminal.js        the themed views, one standalone file each

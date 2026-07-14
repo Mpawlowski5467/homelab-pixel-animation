@@ -12,23 +12,30 @@ window.App = window.App || {};
   function miniSpark(ctx, cx, cy, state, t, o) {
     o = o || {};
     var pr = C.STATE_PRESETS[state] || C.STATE_PRESETS.idle;
-    var wave = Math.sin(t * pr.pulseHz * 6.283);
-    var pulse = pr.pulseShape === 'square' ? 1 + pr.pulseDepth * (wave > 0 ? 1 : -1)
-                                           : 1 + pr.pulseDepth * wave;
+    var TAU = Math.PI * 2;
+    var phase = (typeof o.phase === 'number' && isFinite(o.phase)) ? o.phase : 0;
+    phase -= Math.floor(phase); // phase is expressed as a stable 0..1 cycle offset
+    var phaseAngle = phase * TAU;
+    var reduceMotion = !!App.reduceMotion;
+    var wave = Math.sin(t * pr.pulseHz * TAU + phaseAngle);
+    var pulse = reduceMotion ? 1
+      : pr.pulseShape === 'square' ? 1 + pr.pulseDepth * (wave > 0 ? 1 : -1)
+                                   : 1 + pr.pulseDepth * wave;
     var intensity = (pr.intensity == null ? 1 : pr.intensity);
-    if (pr.flash) intensity *= (wave > 0 ? 1 : 0.62);
+    if (pr.flash && !reduceMotion) intensity *= (wave > 0 ? 1 : 0.62);
     var dx = 0, dy = 0;
-    if (pr.shake) {
+    if (pr.shake && !reduceMotion) {
       var a = pr.shake.amp * (o.shake == null ? 0.5 : o.shake);
-      dx = Math.round(Math.sin(t * pr.shake.hz * 6.283) * a);
-      dy = Math.round(Math.cos(t * pr.shake.hz * 5.1) * a);
+      dx = Math.round(Math.sin(t * pr.shake.hz * TAU + phaseAngle) * a);
+      dy = Math.round(Math.cos(t * pr.shake.hz * 5.1 + phaseAngle * 1.37) * a);
     }
     ctx.save();
     if (dx || dy) ctx.translate(dx, dy);
     S.drawSpark(ctx, {
       cx: cx, cy: cy, spokes: 12,
       longLen: o.longLen || 11, shortLen: o.shortLen || 6.5, thickness: o.thickness || 1.2,
-      rotation: t * (pr.spinDegPerSec || 0) * Math.PI / 180,
+      // Offset within one spoke interval so neighbouring sparks do not rotate in lockstep.
+      rotation: (reduceMotion ? 0 : t * (pr.spinDegPerSec || 0) * Math.PI / 180) + phaseAngle / 12,
       coreRadius: o.coreRadius || 2.3, palette: palOf(state), intensity: intensity, pulse: pulse,
     });
     ctx.restore();
